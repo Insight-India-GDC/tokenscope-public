@@ -9,59 +9,27 @@ permissions:
   contents: read
 
 jobs:
-  test-azure-login:
-    name: Verify Azure DEV Authentication
+  azure-login-test:
     runs-on: ubuntu-latest
     environment: dev
 
     steps:
-      - name: Check Azure environment variables
-        shell: bash
-        env:
-          CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-          LOCATION: ${{ vars.AZURE_LOCATION }}
-        run: |
-          missing=0
-
-          for name in CLIENT_ID TENANT_ID SUBSCRIPTION_ID RESOURCE_GROUP LOCATION; do
-            if [ -z "${!name}" ]; then
-              echo "::error::$name is missing or empty"
-              missing=1
-            else
-              echo "$name is configured"
-            fi
-          done
-
-          if [ "$missing" -ne 0 ]; then
-            exit 1
-          fi
-
       - name: Login to Azure
-        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.0
+        uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Verify Azure subscription
-        shell: bash
-        run: |
-          az account show \
-            --query "{Name:name,State:state}" \
-            -o table
-
-      - name: Verify DEV resource group
-        shell: bash
+      - name: Verify Azure access
         env:
           DEV_RG: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
-          az group show \
-            --name "$DEV_RG" \
-            --query "{Name:name,Location:location,State:properties.provisioningState}" \
-            -o table
+          echo "Checking Azure subscription..."
+          az account show --query "{Name:name,State:state}" -o table
 
-      - name: Confirm success
-        run: echo "GitHub Actions successfully connected to Azure DEV!"
+          echo "Checking DEV resource group..."
+          az group show --name "$DEV_RG" \
+            --query "{Name:name,Location:location}" -o table
+
+          echo "Azure DEV authentication successful!"

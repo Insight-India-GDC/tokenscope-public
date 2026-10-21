@@ -10,26 +10,38 @@ permissions:
 
 jobs:
   test-azure-login:
+    name: Verify Azure DEV Authentication
     runs-on: ubuntu-latest
     environment: dev
 
     steps:
       - name: Login to Azure
-        uses: azure/login@v2
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify Azure subscription
+        shell: bash
         run: |
-          az account show --query "{Name:name,State:state}" -o table
+          echo "Checking Azure subscription..."
+          az account show \
+            --query "{Name:name,State:state}" \
+            -o table
 
       - name: Verify DEV resource group
+        shell: bash
         env:
           DEV_RG: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
-          az group show --name "$DEV_RG" -o table
+          echo "Checking DEV resource group..."
+          az group show \
+            --name "$DEV_RG" \
+            --query "{Name:name,Location:location,State:properties.provisioningState}" \
+            -o table
 
       - name: Confirm success
-        run: echo "GitHub Actions successfully connected to Azure DEV!"
+        shell: bash
+        run: |
+          echo "GitHub Actions successfully connected to Azure DEV!"

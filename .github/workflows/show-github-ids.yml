@@ -1,0 +1,28 @@
+
+name: Show GitHub IDs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/show-github-ids.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  show-ids:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print GitHub IDs
+        env:
+          ORG_NAME: ${{ github.repository_owner }}
+          ORG_ID: ${{ github.repository_owner_id }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_ID: ${{ github.repository_id }}
+        run: |
+          echo "Organization: $ORG_NAME"
+          echo "Organization ID: $ORG_ID"
+          echo "Repository: $REPO_NAME"
+          echo "Repository ID: $REPO_ID"
+  

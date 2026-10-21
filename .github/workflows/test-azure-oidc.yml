@@ -11,7 +11,7 @@ permissions:
 jobs:
   azure-login-test:
     runs-on: ubuntu-latest
-    environment: dev
+    environment: AZURE_SUBSCRIPTION_ID
 
     steps:
       - name: Login to Azure

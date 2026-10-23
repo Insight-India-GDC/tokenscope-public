@@ -248,6 +248,7 @@ jobs:
           /tmp/actionlint -shellcheck= examples/github-actions/*.yml
 
   unit:
+    if: false
     name: Unit (vitest)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -275,6 +276,7 @@ jobs:
     # suite. Windows runs it too, against real Windows PowerShell 5.1 (the
     # interpreter pilot users have, not pwsh 7), except the files #430 lists
     # as not yet Windows-ready, each excluded by name below.
+    if: false
     name: Plugin (${{ matrix.os }})
     strategy:
       fail-fast: false

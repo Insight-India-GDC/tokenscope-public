@@ -344,7 +344,7 @@ param deployAzureMonitorWorkspace bool = true
 // container app's first revision can't pull from ACR (401) and can't
 // resolve KV-ref secrets (403). Every parameter file in
 // infra/parameters/ sets it true; do not bare-apply main.bicep.
-param deployRbac bool = false
+param deployRbac bool = true
 
 // ── Front Door ──────────────────────────────────────────────────────
 // Tiers, Private Link approval and FDID enforcement: see the file header and

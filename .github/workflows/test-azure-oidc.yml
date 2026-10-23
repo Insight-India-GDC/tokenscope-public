@@ -37,6 +37,7 @@ jobs:
       - name: Check Service Principal Role Assignments
         run: |
           echo "=== Current Role Assignments ==="
+
           az role assignment list \
             --assignee ${{ vars.AZURE_CLIENT_ID }} \
             --all \
@@ -56,3 +57,26 @@ jobs:
             Microsoft.ManagedIdentity \
             Microsoft.OperationalInsights \
             Microsoft.Insights \
+            Microsoft.Monitor
+          do
+            echo ""
+            echo "Provider: $p"
+
+            az provider show \
+              --namespace "$p" \
+              --query "{Provider:namespace,State:registrationState}" \
+              -o table
+          done
+
+      - name: List Unregistered Providers
+        run: |
+          echo "=== Unregistered Providers ==="
+
+          az provider list \
+            --query "[?registrationState!='Registered'].{Provider:namespace,State:registrationState}" \
+            -o table
+
+      - name: Success
+        run: |
+          echo "Azure login successful"
+          echo "Provider check completed"

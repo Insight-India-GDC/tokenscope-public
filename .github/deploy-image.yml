@@ -1,0 +1,169 @@
+name: Deploy TokenScope Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional image tag. Leave empty to use the short commit SHA."
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-image-dev
+  cancel-in-progress: false
+
+jobs:
+  build-push-deploy:
+    name: Build, Push and Deploy DEV
+
+    # ACR has public access disabled, so this runner must have network
+    # connectivity to the ACR private endpoint.
+    runs-on: ubuntu-latest-azureuswest3-4core
+
+    environment: dev
+    timeout-minutes: 45
+
+    env:
+      AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-dev-helios-001
+      ACR_NAME: crtokenscopeigdcdevweu
+      IMAGE_NAME: tokenscope
+      CONTAINER_APP_NAME: ca-tokenscopeigdc-dev-weu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Azure Login using OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify Dockerfile
+        run: |
+          set -euo pipefail
+
+          if [ ! -f Dockerfile ]; then
+            echo "::error::Root Dockerfile was not found."
+            echo "The workflow expects: $GITHUB_WORKSPACE/Dockerfile"
+            exit 1
+          fi
+
+          echo "Root Dockerfile found."
+
+      - name: Resolve image tag
+        id: image
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          TAG="$TAG_INPUT"
+
+          if [ -z "$TAG" ]; then
+            TAG="$(git rev-parse --short HEAD)"
+          fi
+
+          if ! [[ "$TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid image tag: $TAG"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using image tag: $TAG"
+
+      - name: Verify target resources
+        run: |
+          set -euo pipefail
+
+          az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "{name:name,loginServer:loginServer,publicNetworkAccess:publicNetworkAccess}" \
+            --output table
+
+          az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "{name:name,provisioningState:properties.provisioningState}" \
+            --output table
+
+      - name: Login to private ACR
+        run: |
+          set -euo pipefail
+          az acr login --name "$ACR_NAME"
+
+      - name: Build Docker image
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --file Dockerfile \
+            --cache-from "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest" \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg GIT_COMMIT_SHA="${GITHUB_SHA}" \
+            --tag "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}" \
+            --tag "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest" \
+            .
+
+      - name: Push Docker image
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          docker push "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+          docker push "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
+
+      - name: Confirm image tags in ACR
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          az acr repository show-tags \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --output table
+
+      - name: Update Container App
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Show deployment information
+        run: |
+          set -euo pipefail
+
+          FQDN="$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.fqdn" \
+            --output tsv)"
+
+          REVISION="$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.latestRevisionName" \
+            --output tsv)"
+
+          echo "Container App: $CONTAINER_APP_NAME"
+          echo "Revision: $REVISION"
+          echo "Application FQDN: $FQDN"
+          echo "::notice::Image pushed and Container App updated: https://${FQDN}"

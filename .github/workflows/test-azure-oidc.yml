@@ -1,4 +1,3 @@
-
 name: Test Azure DEV OIDC
 
 on:
@@ -15,7 +14,7 @@ jobs:
 
     steps:
       - name: Login to Azure
-        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
+        uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -25,11 +24,35 @@ jobs:
         env:
           DEV_RG: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
-          echo "Checking Azure subscription..."
-          az account show --query "{Name:name,State:state}" -o table
+          echo "=== Subscription ==="
+          az account show --query "{Name:name,State:state,Subscription:id}" -o table
 
-          echo "Checking DEV resource group..."
-          az group show --name "$DEV_RG" \
-            --query "{Name:name,Location:location}" -o table
+          echo ""
+          echo "=== Resource Group ==="
+          az group show \
+            --name "$DEV_RG" \
+            --query "{Name:name,Location:location}" \
+            -o table
 
-          echo "Azure DEV authentication successful!"
+      - name: Check Service Principal Role Assignments
+        run: |
+          echo "=== Current Role Assignments ==="
+          az role assignment list \
+            --assignee ${{ vars.AZURE_CLIENT_ID }} \
+            --all \
+            -o table || true
+
+      - name: Check Required Resource Providers
+        run: |
+          echo "=== Provider Status ==="
+
+          for p in \
+            Microsoft.Storage \
+            Microsoft.ContainerRegistry \
+            Microsoft.App \
+            Microsoft.KeyVault \
+            Microsoft.DBforPostgreSQL \
+            Microsoft.Cache \
+            Microsoft.ManagedIdentity \
+            Microsoft.OperationalInsights \
+            Microsoft.Insights \

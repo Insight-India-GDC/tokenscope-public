@@ -1,0 +1,40 @@
+name: Deploy TokenScope DEV
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Azure Login
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Infrastructure
+        env:
+          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+        run: |
+          az deployment group create \
+            -g rg-westeurope-t1-amd-dev-helios-001 \
+            -f infra/main.bicep \
+            -p infra/parameters/dev.bicepparam

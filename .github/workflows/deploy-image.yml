@@ -22,7 +22,7 @@ jobs:
 
     # ACR has public access disabled, so this runner must have network
     # connectivity to the ACR private endpoint.
-    runs-on: ubuntu-latest-azureuswest3-4core
+    runs-on: ubuntu-latest
 
     environment: dev
     timeout-minutes: 45

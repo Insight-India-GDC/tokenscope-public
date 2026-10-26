@@ -72,7 +72,7 @@ param allowPersonaOverride = false    // refused outside local/sandbox anyway
 param workerBaseUrl = ''
 
 // ── Networking ───────────────────────────────────────────────────────────
-param enablePrivateNetworking = true
+param enablePrivateNetworking = false
 
 // Address space from your IPAM. Minimums: Container Apps /27, private
 // endpoints /28 (4 PEs + headroom), AMPLS /28 (its endpoint is multi-IP).

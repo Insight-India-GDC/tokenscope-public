@@ -128,7 +128,7 @@ param monitorQueryPrivateOnly = false
 //      entraIdRedirectUri and workerBaseUrl on the Front Door endpoint
 // Premium's managed WAF rules start in Log mode; set
 // frontDoorWafManagedRuleAction = 'Block' once the logs are clean.
-param enableFrontDoor = false
+param enableFrontDoor = true
 // param frontDoorSku = 'Premium'
 // param frontDoorId = ''
 // param frontDoorWafManagedRuleAction = 'Log'

@@ -351,11 +351,11 @@ param deployRbac bool = true
 // docs/DEPLOY-AZURE.md.
 
 @description('Provision Azure Front Door + WAF in front of the container app. Defaults false; set it explicitly. With enablePrivateNetworking it requires frontDoorSku Premium.')
-param enableFrontDoor bool = false
+param enableFrontDoor bool = true
 
 @description('Front Door tier when enableFrontDoor. Standard fronts the app\'s public ingress. Premium is required with enablePrivateNetworking: it reaches the internal environment over Private Link, and its private endpoint request must be approved after the apply (docs/DEPLOY-AZURE.md). Premium adds the managed WAF rule sets.')
 @allowed(['Standard', 'Premium'])
-param frontDoorSku string = 'Standard'
+param frontDoorSku string = 'Premium'
 
 @description('Premium only: what the managed WAF rule sets (DRS 2.1, Bot Manager 1.1) do on a match. Log observes; switch to Block once the logs show no false positives on developer traffic.')
 @allowed(['Log', 'Block'])

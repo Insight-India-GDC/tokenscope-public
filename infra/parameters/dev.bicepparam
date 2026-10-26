@@ -58,7 +58,7 @@ param appPublicOrigin = 'https://ep-tokenscopeigdc-dev-weu-chh4hycshyh0g2dp.a03.
 // Use values from the tokenscope-dev-user-login App Registration.
 // Do not use the GitHub deployment application's client ID here.
 
-param entraIdClientId = '901fca3c-c700-4f26-add8-66e62c172fc6'
+param entraIdClientId = '1d51bb60-1d9b-4d5b-8bbb-6096d583d4af'
 param entraIdTenantId = '6c637512-c417-4e78-9d62-b61258e4b619'
 
 param entraIdRedirectUri = 'https://ep-tokenscopeigdc-dev-weu-chh4hycshyh0g2dp.a03.azurefd.net/auth/entra/callback'

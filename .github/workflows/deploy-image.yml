@@ -11,7 +11,7 @@ jobs:
   build-push-deploy:
     name: Build, Push and Deploy DEV
 
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     environment: dev
     timeout-minutes: 45

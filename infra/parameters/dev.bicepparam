@@ -51,13 +51,13 @@ param githubAppKeyPartnerDemo = readEnvironmentVariable('GH_APP_KEY_PARTNER_DEMO
 //   (b) Azure Front Door Premium over Private Link (the Front Door section).
 // Pin the public origin users see so self-URLs, CSRF, cookies and OAuth
 // metadata are right: (a) your hostname, (b) https://<frontDoorEndpointFqdn>.
-param appPublicOrigin = 'https://tokenscope.example.com'
+param appPublicOrigin = 'https://ep-tokenscopeigdc-dev-weu-chh4hycshyh0g2dp.a03.azurefd.net'
 
 // ── Auth (Entra ID OIDC) ─────────────────────────────────────────────────
 param entraIdTenantId = ''
 param entraIdClientId = ''
-param entraIdRedirectUri = 'https://tokenscope.example.com/auth/entra/callback'
-param bootstrapAdminEmail = ''        // first sign-in → platform-admin
+param entraIdRedirectUri = 'https://ep-tokenscopeigdc-dev-weu-chh4hycshyh0g2dp.a03.azurefd.net/auth/entra/callback'
+param bootstrapAdminEmail = 'manideep.muddagowni@insight.com'        // first sign-in → platform-admin
 param allowPersonaOverride = false    // refused outside local/sandbox anyway
 
 // ── Scheduled workers ────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ param allowPersonaOverride = false    // refused outside local/sandbox anyway
 //       is set the app refuses direct calls, and the jobs reach Front Door
 //       through the environment's outbound internet access (allow it if you
 //       force outbound traffic through a firewall).
-param workerBaseUrl = ''
+param workerBaseUrl = 'https://ep-tokenscopeigdc-dev-weu-chh4hycshyh0g2dp.a03.azurefd.net'
 
 // ── Networking ───────────────────────────────────────────────────────────
 param enablePrivateNetworking = true
@@ -130,7 +130,7 @@ param monitorQueryPrivateOnly = false
 // frontDoorWafManagedRuleAction = 'Block' once the logs are clean.
 param enableFrontDoor = true
 // param frontDoorSku = 'Premium'
-// param frontDoorId = ''
+// param frontDoorId = '2a519381-32ba-4d71-9395-f69a3306dade'
 // param frontDoorWafManagedRuleAction = 'Log'
 
 // ── Optional ─────────────────────────────────────────────────────────────

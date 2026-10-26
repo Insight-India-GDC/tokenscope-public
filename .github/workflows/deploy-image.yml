@@ -1,4 +1,4 @@
-name: Deploy TokenScope Image
+name: Debug ACR Access
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  test-acr-access:
+  debug-acr:
     runs-on: ubuntu-latest
 
     environment: dev
@@ -18,6 +18,9 @@ jobs:
       ACR_NAME: crtokenscopeigdcdevweu
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Azure Login using OIDC
         uses: azure/login@v2
         with:
@@ -28,14 +31,21 @@ jobs:
       - name: Show Azure Account
         run: |
           echo "===== ACCOUNT ====="
-          az account show
+          az account show -o json
 
-      - name: Show OIDC Service Principal
+      - name: Show Current User
+        run: |
+          echo "===== USER ====="
+          az account show --query user -o json
+
+      - name: Show Service Principal
         run: |
           echo "===== SERVICE PRINCIPAL ====="
+
           az ad sp show \
             --id "${{ vars.AZURE_CLIENT_ID }}" \
-            --output json || true
+            --query "{displayName:displayName,id:id,appId:appId}" \
+            -o json
 
       - name: Show ACR Details
         run: |
@@ -46,15 +56,17 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output json
 
-      - name: Test ACR Access
+      - name: Test ACR Repository Access
+        continue-on-error: true
         run: |
-          echo "===== TEST ACR ACCESS ====="
+          echo "===== TEST ACR REPOSITORY ACCESS ====="
 
           az acr repository list \
             --name "$ACR_NAME" \
             --output table
 
       - name: Test ACR Login
+        continue-on-error: true
         run: |
           echo "===== TEST ACR LOGIN ====="
 
@@ -62,9 +74,18 @@ jobs:
             --name "$ACR_NAME"
 
       - name: Check ACR Health
+        continue-on-error: true
         run: |
           echo "===== ACR HEALTH ====="
 
           az acr check-health \
             --name "$ACR_NAME" \
             --yes
+
+      - name: Show Subscriptions
+        run: |
+          echo "===== SUBSCRIPTION ====="
+
+          az account show \
+            --query "{name:name,id:id,tenantId:tenantId}" \
+            -o table

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   deploy:
-    name: Validate and Preview TokenScope DEV
+    name: Deploy TokenScope DEV Infrastructure
     runs-on: ubuntu-latest
     environment: dev
 
@@ -27,7 +27,7 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # STEP 3: Validate OIDC secrets
+      # STEP 3: Validate OIDC secret formats
       - name: Validate OIDC Secret Formats
         env:
           OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
@@ -100,9 +100,8 @@ jobs:
 
           echo "SUCCESS: Bicep validation completed"
 
-      # STEP 5: Preview infrastructure changes
-      # This step does not deploy resources.
-      - name: Preview DEV Infrastructure Changes
+      # STEP 5: Deploy infrastructure to Azure
+      - name: Deploy DEV Infrastructure
         env:
           PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
           PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
@@ -115,18 +114,17 @@ jobs:
           ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
         shell: bash
         run: |
-          echo "Starting TokenScope DEV infrastructure preview..."
+          echo "Starting TokenScope DEV infrastructure deployment..."
 
-          az deployment group what-if \
+          az deployment group create \
             --resource-group rg-westeurope-t1-amd-dev-helios-001 \
             --template-file infra/main.bicep \
             --parameters infra/parameters/dev.bicepparam \
-            --result-format ResourceIdOnly
+            --only-show-errors
 
-          echo "SUCCESS: Infrastructure preview completed"
-          echo "No Azure resources were deployed"
+          echo "SUCCESS: TokenScope DEV infrastructure deployment completed"
 
-      # STEP 6: Logout
+      # STEP 6: Logout from Azure
       - name: Azure Logout
         if: always()
         shell: bash

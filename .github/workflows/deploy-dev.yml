@@ -1,3 +1,4 @@
+
 name: Deploy TokenScope DEV
 
 on:
@@ -9,12 +10,16 @@ permissions:
 
 jobs:
   deploy:
+    name: Validate and Preview TokenScope DEV
     runs-on: ubuntu-latest
     environment: dev
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # STEP 1: Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # STEP 2: Login to Azure
       - name: Azure Login
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
@@ -22,7 +27,55 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy Infrastructure
+      # STEP 3: Validate OIDC secrets
+      - name: Validate OIDC Secret Formats
+        env:
+          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import base64
+          import binascii
+
+          for name in (
+              "OIDC_SESSION_SECRET",
+              "OIDC_AUTH_SESSION_SECRET"
+          ):
+              value = os.environ.get(name, "")
+
+              if len(value) < 48:
+                  raise SystemExit(
+                      f"ERROR: {name} must contain at least 48 characters"
+                  )
+
+              print(f"PASS: {name} format valid")
+
+          key = os.environ.get("OIDC_TOKEN_KEY", "")
+
+          try:
+              decoded = base64.b64decode(
+                  key,
+                  validate=True
+              )
+          except (binascii.Error, ValueError):
+              raise SystemExit(
+                  "ERROR: OIDC_TOKEN_KEY must be valid Base64"
+              )
+
+          if len(decoded) != 32:
+              raise SystemExit(
+                  "ERROR: OIDC_TOKEN_KEY must decode to exactly 32 bytes"
+              )
+
+          print("PASS: OIDC_TOKEN_KEY format valid")
+          print("SUCCESS: All OIDC secrets passed validation")
+          PY
+
+      # STEP 4: Validate Bicep templates
+      - name: Validate Bicep Templates
         env:
           PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
           PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
@@ -33,8 +86,49 @@ jobs:
           OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
           OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
           ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+        shell: bash
         run: |
-          az deployment group create \
-            -g rg-westeurope-t1-amd-dev-helios-001 \
-            -f infra/main.bicep \
-            -p infra/parameters/dev.bicepparam
+          echo "Validating TokenScope Bicep templates..."
+
+          az bicep build \
+            --file infra/main.bicep \
+            --stdout > /dev/null
+
+          az bicep build-params \
+            --file infra/parameters/dev.bicepparam \
+            --stdout > /dev/null
+
+          echo "SUCCESS: Bicep validation completed"
+
+      # STEP 5: Preview infrastructure changes
+      # This step does not deploy resources.
+      - name: Preview DEV Infrastructure Changes
+        env:
+          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          echo "Starting TokenScope DEV infrastructure preview..."
+
+          az deployment group what-if \
+            --resource-group rg-westeurope-t1-amd-dev-helios-001 \
+            --template-file infra/main.bicep \
+            --parameters infra/parameters/dev.bicepparam \
+            --result-format ResourceIdOnly
+
+          echo "SUCCESS: Infrastructure preview completed"
+          echo "No Azure resources were deployed"
+
+      # STEP 6: Logout
+      - name: Azure Logout
+        if: always()
+        shell: bash
+        run: |
+          az logout || true

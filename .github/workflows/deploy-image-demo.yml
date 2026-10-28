@@ -28,7 +28,7 @@ jobs:
       # STEP 2: Login to Azure using GitHub OIDC
       # Using the same azure/login SHA that worked in deploy-demo.yml
       - name: Azure Login using OIDC
-        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
+        uses: azure/login@053f7285eb20bf5469ef084617b0b24d3cec53fc
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

@@ -10,9 +10,7 @@ permissions:
 jobs:
   build-push-deploy:
     name: Build, Push and Deploy DEV
-
     runs-on: ubuntu-latest
-
     environment: dev
     timeout-minutes: 45
 
@@ -27,7 +25,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Azure Login using OIDC
-        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        uses: azure/login@14a755a4e2fd6dff25794233def4f2cf3f866955
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

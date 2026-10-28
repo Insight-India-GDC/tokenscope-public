@@ -11,7 +11,6 @@ jobs:
   build-push-deploy:
     name: Build, Push and Deploy DEMO
     runs-on: ubuntu-latest
-
     environment: demo
     timeout-minutes: 45
 
@@ -22,58 +21,83 @@ jobs:
       CONTAINER_APP_NAME: ca-tokenscopeigdcdemo-dev-weu
 
     steps:
+      # STEP 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
+      # STEP 2: Login to Azure using GitHub OIDC
+      # Using the same azure/login SHA that worked in deploy-demo.yml
       - name: Azure Login using OIDC
-        uses: azure/login@14a755a4e2fd6dff25794233def4f2cf3f866955
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # STEP 3: Verify DEMO target resources
       - name: Verify target resources
+        shell: bash
         run: |
+          echo "Resource Group: $AZURE_RESOURCE_GROUP"
+          echo "ACR: $ACR_NAME"
+          echo "Container App: $CONTAINER_APP_NAME"
+
           az acr show \
             --name "$ACR_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
 
+      # STEP 4: Login to DEMO ACR
       - name: Login to DEMO ACR
+        shell: bash
         run: |
-          az acr login --name "$ACR_NAME"
+          az acr login \
+            --name "$ACR_NAME"
 
+      # STEP 5: Build TokenScope image
       - name: Build Docker image
+        shell: bash
         run: |
           docker build \
             -t "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest" .
 
+      # STEP 6: Push TokenScope image
       - name: Push Docker image
+        shell: bash
         run: |
-          docker push "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
+          docker push \
+            "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
 
+      # STEP 7: Verify latest image exists
       - name: Verify image exists
+        shell: bash
         run: |
           az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output table
 
+      # STEP 8: Update DEMO Container App
       - name: Update DEMO Container App
+        shell: bash
         run: |
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
 
+      # STEP 9: Verify Container App revisions
       - name: Verify DEMO Container App
+        shell: bash
         run: |
           az containerapp revision list \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
 
+      # STEP 10: Logout
       - name: Azure Logout
         if: always()
+        shell: bash
         run: |
           az logout || true

@@ -135,7 +135,7 @@ param monitorQueryPrivateOnly = false
 // Keep Front Door disabled while creating the private infrastructure and
 // pushing tokenscope:latest into the new DEMO ACR.
 
-param enableFrontDoor = false
+param enableFrontDoor = true
 
 // Premium will be used during the Front Door deployment pass.
 

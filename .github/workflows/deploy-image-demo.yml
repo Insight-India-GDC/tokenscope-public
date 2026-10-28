@@ -1,0 +1,79 @@
+name: Build and Deploy TokenScope DEMO Image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-push-deploy:
+    name: Build, Push and Deploy DEMO
+    runs-on: ubuntu-latest
+
+    environment: demo
+    timeout-minutes: 45
+
+    env:
+      AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-demo-helios-001
+      ACR_NAME: crtokenscopeigdcdemodevweu
+      IMAGE_NAME: tokenscope
+      CONTAINER_APP_NAME: ca-tokenscopeigdcdemo-dev-weu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Azure Login using OIDC
+        uses: azure/login@14a755a4e2fd6dff25794233def4f2cf3f866955
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify target resources
+        run: |
+          az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output table
+
+      - name: Login to DEMO ACR
+        run: |
+          az acr login --name "$ACR_NAME"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest" .
+
+      - name: Push Docker image
+        run: |
+          docker push "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
+
+      - name: Verify image exists
+        run: |
+          az acr repository show-tags \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --output table
+
+      - name: Update DEMO Container App
+        run: |
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
+
+      - name: Verify DEMO Container App
+        run: |
+          az containerapp revision list \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output table
+
+      - name: Azure Logout
+        if: always()
+        run: |
+          az logout || true

@@ -1,0 +1,192 @@
+name: Deploy TokenScope DEMO
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy TokenScope DEMO Infrastructure
+    runs-on: ubuntu-latest
+
+    # IMPORTANT:
+    # This makes GitHub use variables and secrets from:
+    # Settings -> Environments -> demo
+    environment: demo
+
+    steps:
+      # STEP 1: Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # STEP 2: Login to Azure using GitHub OIDC
+      - name: Azure Login
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # STEP 3: Verify target
+      - name: Verify DEMO Deployment Target
+        shell: bash
+        run: |
+          echo "Resource Group: ${{ vars.AZURE_RESOURCE_GROUP }}"
+          echo "Location:       ${{ vars.AZURE_LOCATION }}"
+
+          az group show \
+            --name "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --output table
+
+      # STEP 4: Validate OIDC secret formats
+      - name: Validate OIDC Secret Formats
+        env:
+          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import base64
+          import binascii
+
+          for name in (
+              "OIDC_SESSION_SECRET",
+              "OIDC_AUTH_SESSION_SECRET"
+          ):
+              value = os.environ.get(name, "")
+
+              if len(value) < 48:
+                  raise SystemExit(
+                      f"ERROR: {name} must contain at least 48 characters"
+                  )
+
+              print(f"PASS: {name} format valid")
+
+          key = os.environ.get("OIDC_TOKEN_KEY", "")
+
+          try:
+              decoded = base64.b64decode(
+                  key,
+                  validate=True
+              )
+          except (binascii.Error, ValueError):
+              raise SystemExit(
+                  "ERROR: OIDC_TOKEN_KEY must be valid Base64"
+              )
+
+          if len(decoded) != 32:
+              raise SystemExit(
+                  "ERROR: OIDC_TOKEN_KEY must decode to exactly 32 bytes"
+              )
+
+          print("PASS: OIDC_TOKEN_KEY format valid")
+          print("SUCCESS: All OIDC secrets passed validation")
+          PY
+
+      # STEP 5: Validate required secrets exist
+      - name: Validate Required DEMO Secrets
+        env:
+          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          required=(
+            PG_ADMIN_LOGIN
+            PG_ADMIN_PASSWORD
+            SESSION_SECRET
+            HMAC_SESSION_KEY
+            INTERNAL_WORKER_HMAC_KEY
+            OIDC_SESSION_SECRET
+            OIDC_AUTH_SESSION_SECRET
+            OIDC_TOKEN_KEY
+            ENTRA_CLIENT_SECRET
+          )
+
+          for name in "${required[@]}"; do
+            if [ -z "${!name}" ]; then
+              echo "ERROR: Missing GitHub DEMO environment secret: $name"
+              exit 1
+            fi
+          done
+
+          echo "SUCCESS: Required DEMO secrets are available"
+
+      # STEP 6: Validate Bicep templates
+      - name: Validate DEMO Bicep Templates
+        env:
+          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          echo "Validating TokenScope DEMO Bicep templates..."
+
+          az bicep build \
+            --file infra/main.bicep \
+            --stdout > /dev/null
+
+          az bicep build-params \
+            --file infra/parameters/demo.bicepparam \
+            --stdout > /dev/null
+
+          echo "SUCCESS: DEMO Bicep validation completed"
+
+      # STEP 7: Deploy infrastructure
+      - name: Deploy DEMO Infrastructure
+        env:
+          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          echo "Starting TokenScope DEMO infrastructure deployment..."
+
+          az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/main.bicep \
+            --parameters infra/parameters/demo.bicepparam \
+            --only-show-errors
+
+          echo "SUCCESS: TokenScope DEMO infrastructure deployment completed"
+
+      # STEP 8: Show deployment outputs
+      - name: Show DEMO Deployment Outputs
+        if: success()
+        shell: bash
+        run: |
+          az deployment group show \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --name main \
+            --query properties.outputs \
+            --output json
+
+      # STEP 9: Logout
+      - name: Azure Logout
+        if: always()
+        shell: bash
+        run: |
+          az logout || true

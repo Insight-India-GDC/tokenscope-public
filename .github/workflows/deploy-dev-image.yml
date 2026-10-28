@@ -1,3 +1,4 @@
+
 name: Build and Deploy TokenScope DEV Image
 
 on:
@@ -7,12 +8,16 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: tokenscope-dev-image
+  cancel-in-progress: false
+
 jobs:
   build-push-deploy:
     name: Build, Push and Deploy DEV
     runs-on: ubuntu-latest
     environment: dev
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     env:
       AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-dev-helios-001
@@ -22,9 +27,11 @@ jobs:
       CONTAINER_APP_NAME: ca-tokenscopeigdc-dev-weu
 
     steps:
+      # STEP 1: Checkout
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      
+
+      # STEP 2: Azure Login (previous working SHA)
       - name: Azure Login using OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
@@ -32,65 +39,237 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Verify DEV target and resources
+      # STEP 3: Verify correct environment
+      - name: Verify DEV subscription and resources
         shell: bash
         run: |
           set -euo pipefail
-          ACTUAL_SUB=$(az account show --query id -o tsv)
-          test "$ACTUAL_SUB" = "$EXPECTED_SUBSCRIPTION" || { echo "Wrong Azure subscription"; exit 1; }
-          test "$AZURE_RESOURCE_GROUP" = "rg-westeurope-t1-amd-dev-helios-001"
-          test "$ACR_NAME" = "crtokenscopeigdcdevweu"
-          test "$CONTAINER_APP_NAME" = "ca-tokenscopeigdc-dev-weu"
-          az group show --name "$AZURE_RESOURCE_GROUP" --output none
-          az acr show --name "$ACR_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --output none
-          az containerapp show --name "$CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --output none
-          echo "Validated DEV resources and subscription."
 
+          echo "=== Azure Subscription ==="
+          az account show \
+            --query "{Name:name,Subscription:id,Tenant:tenantId}" \
+            -o table
+
+          ACTUAL_SUB=$(az account show --query id -o tsv)
+
+          if [ "$ACTUAL_SUB" != "$EXPECTED_SUBSCRIPTION" ]; then
+            echo "::error::Wrong Azure subscription!"
+            exit 1
+          fi
+
+          if [ "$AZURE_RESOURCE_GROUP" != "rg-westeurope-t1-amd-dev-helios-001" ]; then
+            echo "::error::Wrong Resource Group!"
+            exit 1
+          fi
+
+          if [ "$ACR_NAME" != "crtokenscopeigdcdevweu" ]; then
+            echo "::error::Wrong ACR!"
+            exit 1
+          fi
+
+          if [ "$CONTAINER_APP_NAME" != "ca-tokenscopeigdc-dev-weu" ]; then
+            echo "::error::Wrong Container App!"
+            exit 1
+          fi
+
+          echo "=== Verify Resource Group ==="
+          az group show \
+            --name "$AZURE_RESOURCE_GROUP" \
+            --output none
+
+          echo "=== Verify ACR ==="
+          az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output none
+
+          echo "=== Verify Container App ==="
+          az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output none
+
+          echo "DEV deployment target verified."
+
+      # STEP 4: Diagnose registry networking
+      - name: Check DEV ACR configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== ACR Details ==="
+          az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query '{
+              Name:name,
+              LoginServer:loginServer,
+              PublicNetworkAccess:publicNetworkAccess,
+              FirewallDefaultAction:networkRuleSet.defaultAction,
+              RoleAssignmentMode:roleAssignmentMode,
+              ProvisioningState:provisioningState
+            }' \
+            -o json
+
+          echo "=== ACR DNS ==="
+          getent hosts "${ACR_NAME}.azurecr.io" || true
+
+          echo "=== ACR Health ==="
+          az acr check-health \
+            --name "$ACR_NAME" \
+            --ignore-errors \
+            --yes || true
+
+      # STEP 5: Diagnose service principal RBAC
+      - name: Check ACR permissions
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+
+          ACR_ID=$(az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query id -o tsv)
+
+          echo "=== Deployment identity roles ==="
+
+          az role assignment list \
+            --assignee "$AZURE_CLIENT_ID" \
+            --scope "$ACR_ID" \
+            --include-inherited \
+            --query '[].{Role:roleDefinitionName,Scope:scope}' \
+            -o table || echo "Unable to list RBAC assignments."
+
+          echo "ACR RBAC inspection completed."
+
+      # STEP 6: Authenticate to ACR
       - name: Login to DEV ACR
         shell: bash
-        run: az acr login --name "$ACR_NAME"
+        run: |
+          set -euo pipefail
 
-      - name: Build Docker image
+          echo "Authenticating to $ACR_NAME"
+
+          if ! az acr login --name "$ACR_NAME"; then
+            echo "::error::ACR login failed."
+            echo "::error::Check AcrPush/Repository Writer permissions."
+            echo "::error::Also check ACR public access, firewall rules and runner networking."
+            exit 1
+          fi
+
+          echo "ACR login successful."
+
+      # STEP 7: Docker build
+      - name: Build TokenScope Docker image
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
-          docker build -t "${IMAGE}:${GITHUB_SHA}" -t "${IMAGE}:latest" .
 
-      - name: Push Docker image
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
+
+          echo "Building image for commit ${GITHUB_SHA}"
+
+          docker build \
+            -t "${IMAGE}:${GITHUB_SHA}" \
+            -t "${IMAGE}:latest" \
+            .
+
+          echo "Docker build successful."
+
+      # STEP 8: Push immutable image tag
+      - name: Push commit-tagged Docker image
         shell: bash
         run: |
           set -euo pipefail
+
           IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
+
           docker push "${IMAGE}:${GITHUB_SHA}"
+
+          echo "Commit-tagged image pushed successfully."
+
+      # STEP 9: Push latest image tag
+      - name: Push latest Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
+
           docker push "${IMAGE}:latest"
 
+          echo "Latest image pushed successfully."
+
+      # STEP 10: Verify registry image
       - name: Verify pushed image
         shell: bash
         run: |
           set -euo pipefail
-          az acr repository show-tags --name "$ACR_NAME" --repository "$IMAGE_NAME" --output table
-          az acr repository show --name "$ACR_NAME" --image "${IMAGE_NAME}:${GITHUB_SHA}" --output none
 
-      - name: Update DEV Container App
+          echo "=== ACR Repository Tags ==="
+
+          az acr repository show-tags \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --output table
+
+          echo "=== Verify commit tag ==="
+
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "${IMAGE_NAME}:${GITHUB_SHA}" \
+            --output none
+
+          echo "Image verification successful."
+
+      # STEP 11: Update Container App
+      - name: Deploy image to DEV Container App
         shell: bash
         run: |
           set -euo pipefail
+
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}"
+
+          echo "Deploying $IMAGE"
+
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}" \
+            --image "$IMAGE" \
             --output none
 
-      - name: Verify DEV Container App revisions
+          echo "Container App update command completed."
+
+      # STEP 12: Verify revisions
+      - name: Verify DEV deployment
         shell: bash
         run: |
+          set -euo pipefail
+
+          echo "=== Container App Revisions ==="
           az containerapp revision list \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output table
+            --query '[].{
+              Name:name,
+              Active:properties.active,
+              RunningState:properties.runningState,
+              HealthState:properties.healthState
+            }' \
+            -o table
 
+          echo "=== Configured Container Images ==="
+          az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'properties.template.containers[].image' \
+            -o tsv
+
+      # STEP 13: Logout
       - name: Azure Logout
         if: always()
         shell: bash
-        run: az logout || true
+        run: |
+          az logout || true

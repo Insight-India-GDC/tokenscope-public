@@ -16,6 +16,7 @@ jobs:
 
     env:
       AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-demo-helios-001
+      EXPECTED_SUBSCRIPTION: a4924ab9-f91e-4235-a611-8b1c3cfb9a7f
       ACR_NAME: crtokenscopeigdcdemodevweu
       IMAGE_NAME: tokenscope
       CONTAINER_APP_NAME: ca-tokenscopeigdcdemo-dev-weu
@@ -24,26 +25,47 @@ jobs:
       # STEP 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      
+
+      # STEP 2: Azure Login using OIDC
       - name: Azure Login using OIDC
-        uses: azure/login@v3
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       # STEP 3: Verify DEMO target resources
-      - name: Verify target resources
+      - name: Verify DEMO target and resources
         shell: bash
         run: |
-          echo "Resource Group: $AZURE_RESOURCE_GROUP"
-          echo "ACR: $ACR_NAME"
-          echo "Container App: $CONTAINER_APP_NAME"
+          set -euo pipefail
+
+          ACTUAL_SUB=$(az account show --query id -o tsv)
+
+          test "$ACTUAL_SUB" = "$EXPECTED_SUBSCRIPTION" || {
+            echo "Wrong Azure subscription"
+            exit 1
+          }
+
+          test "$AZURE_RESOURCE_GROUP" = "rg-westeurope-t1-amd-demo-helios-001"
+          test "$ACR_NAME" = "crtokenscopeigdcdemodevweu"
+          test "$CONTAINER_APP_NAME" = "ca-tokenscopeigdcdemo-dev-weu"
+
+          az group show \
+            --name "$AZURE_RESOURCE_GROUP" \
+            --output none
 
           az acr show \
             --name "$ACR_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output table
+            --output none
+
+          az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output none
+
+          echo "Validated DEMO resources and subscription."
 
       # STEP 4: Login to DEMO ACR
       - name: Login to DEMO ACR
@@ -52,40 +74,60 @@ jobs:
           az acr login \
             --name "$ACR_NAME"
 
-      # STEP 5: Build TokenScope image
+      # STEP 5: Build Docker image
       - name: Build Docker image
         shell: bash
         run: |
-          docker build \
-            -t "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest" .
+          set -euo pipefail
 
-      # STEP 6: Push TokenScope image
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
+
+          docker build \
+            -t "${IMAGE}:${GITHUB_SHA}" \
+            -t "${IMAGE}:latest" \
+            .
+
+      # STEP 6: Push Docker image
       - name: Push Docker image
         shell: bash
         run: |
-          docker push \
-            "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
+          set -euo pipefail
 
-      # STEP 7: Verify latest image exists
-      - name: Verify image exists
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
+
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+
+      # STEP 7: Verify pushed image
+      - name: Verify pushed image
         shell: bash
         run: |
+          set -euo pipefail
+
           az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output table
 
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "${IMAGE_NAME}:${GITHUB_SHA}" \
+            --output none
+
       # STEP 8: Update DEMO Container App
       - name: Update DEMO Container App
         shell: bash
         run: |
+          set -euo pipefail
+
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest"
+            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}" \
+            --output none
 
-      # STEP 9: Verify Container App revisions
-      - name: Verify DEMO Container App
+      # STEP 9: Verify DEMO Container App revisions
+      - name: Verify DEMO Container App revisions
         shell: bash
         run: |
           az containerapp revision list \

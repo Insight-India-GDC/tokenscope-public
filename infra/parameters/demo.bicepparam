@@ -61,7 +61,7 @@ param githubAppKeyPartnerDemo = readEnvironmentVariable(
 // Empty during the initial deployment because the DEMO Front Door endpoint
 // has not been created yet.
 
-param appPublicOrigin = ''
+param appPublicOrigin = 'https://ep-tokenscopeigdcdemo-dev-weu-d0c2adg4hqcrgfcb.a03.azurefd.net'
 
 // ── Microsoft Entra ID authentication ───────────────────────────────────
 // Reuse the approved TokenScope user sign-in App Registration.
@@ -72,7 +72,8 @@ param entraIdTenantId = '6c637512-c417-4e78-9d62-b61258e4b619'
 
 // Updated after the DEMO Front Door endpoint is created.
 
-param entraIdRedirectUri = ''
+param entraIdRedirectUri = 'https://ep-tokenscopeigdcdemo-dev-weu-d0c2adg4hqcrgfcb.a03.azurefd.net/auth/entra/callback'
+
 
 param bootstrapAdminEmail = 'manideep.muddagowni@insight.com'
 param allowPersonaOverride = false
@@ -80,7 +81,7 @@ param allowPersonaOverride = false
 // ── Scheduled workers ────────────────────────────────────────────────────
 // Updated to the DEMO Front Door endpoint during the final deployment pass.
 
-param workerBaseUrl = ''
+param workerBaseUrl = 'https://ep-tokenscopeigdcdemo-dev-weu-d0c2adg4hqcrgfcb.a03.azurefd.net'
 
 // ── Private networking ───────────────────────────────────────────────────
 
@@ -143,7 +144,7 @@ param frontDoorSku = 'Premium'
 
 // Generated after Front Door is created.
 
-param frontDoorId = ''
+param frontDoorId = '8d75f4f6-fb93-4225-87f1-e7abb74e31ee'
 
 // Keep managed WAF rules in Log mode during initial validation.
 

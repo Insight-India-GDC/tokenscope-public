@@ -26,7 +26,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      # STEP 2: Azure Login using OIDC
+      # STEP 2: Login to Azure using GitHub OIDC
       - name: Azure Login using OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
@@ -34,7 +34,7 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # STEP 3: Verify DEMO target resources
+      # STEP 3: Validate DEMO target resources
       - name: Verify DEMO target and resources
         shell: bash
         run: |
@@ -42,14 +42,27 @@ jobs:
 
           ACTUAL_SUB=$(az account show --query id -o tsv)
 
-          test "$ACTUAL_SUB" = "$EXPECTED_SUBSCRIPTION" || {
-            echo "Wrong Azure subscription"
+          if [ "$ACTUAL_SUB" != "$EXPECTED_SUBSCRIPTION" ]; then
+            echo "ERROR: Wrong Azure subscription."
+            echo "Expected: $EXPECTED_SUBSCRIPTION"
+            echo "Actual:   $ACTUAL_SUB"
             exit 1
-          }
+          fi
 
-          test "$AZURE_RESOURCE_GROUP" = "rg-westeurope-t1-amd-demo-helios-001"
-          test "$ACR_NAME" = "crtokenscopeigdcdemodevweu"
-          test "$CONTAINER_APP_NAME" = "ca-tokenscopeigdcdemo-dev-weu"
+          if [ "$AZURE_RESOURCE_GROUP" != "rg-westeurope-t1-amd-demo-helios-001" ]; then
+            echo "ERROR: Wrong resource group."
+            exit 1
+          fi
+
+          if [ "$ACR_NAME" != "crtokenscopeigdcdemodevweu" ]; then
+            echo "ERROR: Wrong ACR."
+            exit 1
+          fi
+
+          if [ "$CONTAINER_APP_NAME" != "ca-tokenscopeigdcdemo-dev-weu" ]; then
+            echo "ERROR: Wrong Container App."
+            exit 1
+          fi
 
           az group show \
             --name "$AZURE_RESOURCE_GROUP" \
@@ -65,12 +78,14 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output none
 
-          echo "Validated DEMO resources and subscription."
+          echo "SUCCESS: Validated DEMO resources and subscription."
 
       # STEP 4: Login to DEMO ACR
       - name: Login to DEMO ACR
         shell: bash
         run: |
+          set -euo pipefail
+
           az acr login \
             --name "$ACR_NAME"
 
@@ -114,6 +129,13 @@ jobs:
             --image "${IMAGE_NAME}:${GITHUB_SHA}" \
             --output none
 
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "${IMAGE_NAME}:latest" \
+            --output none
+
+          echo "SUCCESS: DEMO images verified."
+
       # STEP 8: Update DEMO Container App
       - name: Update DEMO Container App
         shell: bash
@@ -126,10 +148,14 @@ jobs:
             --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}" \
             --output none
 
-      # STEP 9: Verify DEMO Container App revisions
+          echo "SUCCESS: DEMO Container App updated."
+
+      # STEP 9: Verify Container App revisions
       - name: Verify DEMO Container App revisions
         shell: bash
         run: |
+          set -euo pipefail
+
           az containerapp revision list \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \

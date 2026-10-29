@@ -1,4 +1,3 @@
-
 name: Build and Deploy TokenScope DEV Image
 
 on:
@@ -11,7 +10,13 @@ permissions:
 jobs:
   build-push-deploy:
     name: Build, Push and Deploy DEV
-    runs-on: ubuntu-latest
+
+    # Azure VM self-hosted runner inside TokenScope DEV VNet
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+
     environment: dev
     timeout-minutes: 45
 
@@ -23,11 +28,12 @@ jobs:
       CONTAINER_APP_NAME: ca-tokenscopeigdc-dev-weu
 
     steps:
+
       # STEP 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      # STEP 2: Azure Login using OIDC
+      # STEP 2: Login to Azure using GitHub OIDC
       - name: Azure Login using OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
@@ -35,7 +41,28 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # STEP 3: Verify DEV target resources
+      # STEP 3: Verify this job is on the private runner
+      - name: Verify private DEV runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Runner Name: $RUNNER_NAME"
+          echo "Runner OS:   $RUNNER_OS"
+          echo "Hostname:    $(hostname)"
+
+          test "$(hostname)" = "vm-tokenscope-dev-github-runner" || {
+            echo "ERROR: Workflow is not running on expected DEV runner."
+            exit 1
+          }
+
+          echo "Checking private ACR DNS..."
+
+          getent hosts "${ACR_NAME}.azurecr.io"
+
+          echo "SUCCESS: Private DEV runner confirmed."
+
+      # STEP 4: Verify Azure target
       - name: Verify DEV target and resources
         shell: bash
         run: |
@@ -43,10 +70,12 @@ jobs:
 
           ACTUAL_SUB=$(az account show --query id -o tsv)
 
-          test "$ACTUAL_SUB" = "$EXPECTED_SUBSCRIPTION" || {
-            echo "Wrong Azure subscription"
+          if [ "$ACTUAL_SUB" != "$EXPECTED_SUBSCRIPTION" ]; then
+            echo "ERROR: Wrong Azure subscription."
+            echo "Expected: $EXPECTED_SUBSCRIPTION"
+            echo "Actual:   $ACTUAL_SUB"
             exit 1
-          }
+          fi
 
           test "$AZURE_RESOURCE_GROUP" = "rg-westeurope-t1-amd-dev-helios-001"
           test "$ACR_NAME" = "crtokenscopeigdcdevweu"
@@ -66,16 +95,34 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output none
 
-          echo "Validated DEV resources and subscription."
+          echo "SUCCESS: DEV Azure resources validated."
 
-      # STEP 4: Login to DEV ACR
-      - name: Login to DEV ACR
+      # STEP 5: Verify Docker
+      - name: Verify Docker
         shell: bash
         run: |
+          set -euo pipefail
+
+          docker --version
+          docker info > /dev/null
+
+          echo "SUCCESS: Docker is running."
+
+      # STEP 6: Login to PRIVATE DEV ACR
+      - name: Login to private DEV ACR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "ACR private DNS:"
+          getent hosts "${ACR_NAME}.azurecr.io"
+
           az acr login \
             --name "$ACR_NAME"
 
-      # STEP 5: Build Docker image
+          echo "SUCCESS: Logged into private DEV ACR."
+
+      # STEP 7: Build Docker image
       - name: Build Docker image
         shell: bash
         run: |
@@ -88,8 +135,10 @@ jobs:
             -t "${IMAGE}:latest" \
             .
 
-      # STEP 6: Push Docker image
-      - name: Push Docker image
+          echo "SUCCESS: Docker image built."
+
+      # STEP 8: Push immutable image
+      - name: Push commit image
         shell: bash
         run: |
           set -euo pipefail
@@ -97,10 +146,23 @@ jobs:
           IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
 
           docker push "${IMAGE}:${GITHUB_SHA}"
+
+          echo "SUCCESS: Commit-tagged image pushed."
+
+      # STEP 9: Push latest image
+      - name: Push latest image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
+
           docker push "${IMAGE}:latest"
 
-      # STEP 7: Verify latest image exists
-      - name: Verify pushed image
+          echo "SUCCESS: Latest image pushed."
+
+      # STEP 10: Verify ACR images
+      - name: Verify pushed images
         shell: bash
         run: |
           set -euo pipefail
@@ -115,28 +177,65 @@ jobs:
             --image "${IMAGE_NAME}:${GITHUB_SHA}" \
             --output none
 
-      # STEP 8: Update DEV Container App
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "${IMAGE_NAME}:latest" \
+            --output none
+
+          echo "SUCCESS: Images verified in private DEV ACR."
+
+      # STEP 11: Update DEV Container App
       - name: Update DEV Container App
         shell: bash
         run: |
           set -euo pipefail
 
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}"
+
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}" \
+            --image "$IMAGE" \
             --output none
 
-      # STEP 9: Verify Container App revisions
+          echo "SUCCESS: DEV Container App updated."
+
+      # STEP 12: Verify deployed image
+      - name: Verify deployed DEV image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}"
+
+          DEPLOYED_IMAGE=$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" \
+            --output tsv)
+
+          echo "Expected: $EXPECTED_IMAGE"
+          echo "Deployed: $DEPLOYED_IMAGE"
+
+          if [ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]; then
+            echo "ERROR: Wrong image deployed."
+            exit 1
+          fi
+
+          echo "SUCCESS: Correct immutable image deployed."
+
+      # STEP 13: Verify Container App revisions
       - name: Verify DEV Container App revisions
         shell: bash
         run: |
+          set -euo pipefail
+
           az containerapp revision list \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
 
-      # STEP 10: Logout
+      # STEP 14: Logout
       - name: Azure Logout
         if: always()
         shell: bash

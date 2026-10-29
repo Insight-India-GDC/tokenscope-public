@@ -1,4 +1,4 @@
-name: Build and Deploy TokenScope DEMO Image
+name: Build Known-Good DEV Commit for TokenScope DEMO
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-push-deploy:
-    name: Build, Push and Deploy DEMO
+    name: Build and Deploy Known-Good Commit to DEMO
     runs-on: ubuntu-latest
     environment: demo
     timeout-minutes: 45
@@ -21,12 +21,18 @@ jobs:
       IMAGE_NAME: tokenscope
       CONTAINER_APP_NAME: ca-tokenscopeigdcdemo-dev-weu
 
-    steps:
-      # STEP 1: Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # Exact application commit currently working in DEV
+      IMAGE_TAG: 308dde71df94ef0d049ac260b7067b277e28185a
 
-      # STEP 2: Login to Azure using GitHub OIDC
+    steps:
+
+      # STEP 1: Checkout exact known-good DEV commit
+      - name: Checkout known-good DEV commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 308dde71df94ef0d049ac260b7067b277e28185a
+
+      # STEP 2: Azure Login using DEMO OIDC identity
       - name: Azure Login using OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
@@ -34,7 +40,7 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # STEP 3: Validate DEMO target resources
+      # STEP 3: Validate DEMO target
       - name: Verify DEMO target and resources
         shell: bash
         run: |
@@ -43,26 +49,15 @@ jobs:
           ACTUAL_SUB=$(az account show --query id -o tsv)
 
           if [ "$ACTUAL_SUB" != "$EXPECTED_SUBSCRIPTION" ]; then
-            echo "ERROR: Wrong Azure subscription."
+            echo "ERROR: Wrong Azure subscription"
             echo "Expected: $EXPECTED_SUBSCRIPTION"
             echo "Actual:   $ACTUAL_SUB"
             exit 1
           fi
 
-          if [ "$AZURE_RESOURCE_GROUP" != "rg-westeurope-t1-amd-demo-helios-001" ]; then
-            echo "ERROR: Wrong resource group."
-            exit 1
-          fi
-
-          if [ "$ACR_NAME" != "crtokenscopeigdcdemodevweu" ]; then
-            echo "ERROR: Wrong ACR."
-            exit 1
-          fi
-
-          if [ "$CONTAINER_APP_NAME" != "ca-tokenscopeigdcdemo-dev-weu" ]; then
-            echo "ERROR: Wrong Container App."
-            exit 1
-          fi
+          test "$AZURE_RESOURCE_GROUP" = "rg-westeurope-t1-amd-demo-helios-001"
+          test "$ACR_NAME" = "crtokenscopeigdcdemodevweu"
+          test "$CONTAINER_APP_NAME" = "ca-tokenscopeigdcdemo-dev-weu"
 
           az group show \
             --name "$AZURE_RESOURCE_GROUP" \
@@ -78,7 +73,7 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output none
 
-          echo "SUCCESS: Validated DEMO resources and subscription."
+          echo "SUCCESS: DEMO target validated"
 
       # STEP 4: Login to DEMO ACR
       - name: Login to DEMO ACR
@@ -89,8 +84,8 @@ jobs:
           az acr login \
             --name "$ACR_NAME"
 
-      # STEP 5: Build Docker image
-      - name: Build Docker image
+      # STEP 5: Build exact known-good application image
+      - name: Build known-good Docker image
         shell: bash
         run: |
           set -euo pipefail
@@ -98,45 +93,33 @@ jobs:
           IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
 
           docker build \
-            -t "${IMAGE}:${GITHUB_SHA}" \
-            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${IMAGE_TAG}" \
             .
 
-      # STEP 6: Push Docker image
-      - name: Push Docker image
+      # STEP 6: Push known-good image to DEMO ACR
+      - name: Push known-good Docker image
         shell: bash
         run: |
           set -euo pipefail
 
           IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
 
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${IMAGE_TAG}"
 
-      # STEP 7: Verify pushed image
-      - name: Verify pushed image
+      # STEP 7: Verify image exists
+      - name: Verify known-good image
         shell: bash
         run: |
           set -euo pipefail
 
-          az acr repository show-tags \
-            --name "$ACR_NAME" \
-            --repository "$IMAGE_NAME" \
-            --output table
-
           az acr repository show \
             --name "$ACR_NAME" \
-            --image "${IMAGE_NAME}:${GITHUB_SHA}" \
+            --image "${IMAGE_NAME}:${IMAGE_TAG}" \
             --output none
 
-          az acr repository show \
-            --name "$ACR_NAME" \
-            --image "${IMAGE_NAME}:latest" \
-            --output none
+          echo "SUCCESS: Known-good image exists in DEMO ACR"
 
-          echo "SUCCESS: DEMO images verified."
-
-      # STEP 8: Update DEMO Container App
+      # STEP 8: Deploy known-good image to DEMO
       - name: Update DEMO Container App
         shell: bash
         run: |
@@ -145,23 +128,44 @@ jobs:
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}" \
+            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}" \
             --output none
 
-          echo "SUCCESS: DEMO Container App updated."
+          echo "SUCCESS: Known-good DEV commit deployed to DEMO"
 
-      # STEP 9: Verify Container App revisions
-      - name: Verify DEMO Container App revisions
+      # STEP 9: Verify exact image
+      - name: Verify deployed DEMO image
         shell: bash
         run: |
           set -euo pipefail
 
+          DEPLOYED_IMAGE=$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" \
+            --output tsv)
+
+          echo "Deployed image: $DEPLOYED_IMAGE"
+
+          EXPECTED_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          if [ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]; then
+            echo "ERROR: DEMO is not running the expected image"
+            exit 1
+          fi
+
+          echo "SUCCESS: DEMO is running the known-good DEV commit"
+
+      # STEP 10: Verify revisions
+      - name: Verify DEMO Container App revisions
+        shell: bash
+        run: |
           az containerapp revision list \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
 
-      # STEP 10: Logout
+      # STEP 11: Logout
       - name: Azure Logout
         if: always()
         shell: bash

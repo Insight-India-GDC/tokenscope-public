@@ -3,19 +3,26 @@
 using '../main.bicep'
 
 // ── Environment ──────────────────────────────────────────────────────────
-// env='dev' selects DEV-sized Azure resources.
-// DEMO isolation comes from the separate resource group, GitHub environment,
-// parameter file, and unique projectName.
+// env='dev' selects the DEV-sized TokenScope profile.
+// DEMO remains isolated through:
+// - GitHub Environment: demo
+// - Resource Group: rg-westeurope-t1-amd-demo-helios-001
+// - Parameter file: demo.bicepparam
+// - Unique projectName: tokenscopeigdcdemo
 
 param env = 'dev'
 param location = 'westeurope'
 param projectName = 'tokenscopeigdcdemo'
+
+// Keep latest if the image workflow always updates the Container App
+// with an immutable commit-specific image after infrastructure deployment.
 param imageTag = 'latest'
 
 param deployRbac = true
 
-// ── Secrets ──────────────────────────────────────────────────────────────
-// Values are supplied by the GitHub "demo" Environment Secrets.
+// ── Required secrets ─────────────────────────────────────────────────────
+// These values come from:
+// GitHub Repository → Settings → Environments → demo → Environment secrets
 
 param pgAdminLogin = readEnvironmentVariable('PG_ADMIN_LOGIN')
 param pgAdminPassword = readEnvironmentVariable('PG_ADMIN_PASSWORD')
@@ -27,6 +34,10 @@ param internalWorkerHmacKey = readEnvironmentVariable('INTERNAL_WORKER_HMAC_KEY'
 param oidcSessionSecret = readEnvironmentVariable('OIDC_SESSION_SECRET')
 param oidcAuthSessionSecret = readEnvironmentVariable('OIDC_AUTH_SESSION_SECRET')
 param oidcTokenKey = readEnvironmentVariable('OIDC_TOKEN_KEY')
+
+// This must be the Client Secret VALUE created in the Entra App whose
+// Client ID is 1d51bb60-1d9b-4d5b-8bbb-6096d583d4af.
+// Do not use the Secret ID.
 
 param entraIdClientSecret = readEnvironmentVariable('ENTRA_CLIENT_SECRET')
 
@@ -58,28 +69,22 @@ param githubAppKeyPartnerDemo = readEnvironmentVariable(
 )
 
 // ── Public entry point ───────────────────────────────────────────────────
-// Empty during the initial deployment because the DEMO Front Door endpoint
-// has not been created yet.
 
 param appPublicOrigin = 'https://ep-tokenscopeigdcdemo-dev-weu-d0c2adg4hqcrgfcb.a03.azurefd.net'
 
 // ── Microsoft Entra ID authentication ───────────────────────────────────
-// Reuse the approved TokenScope user sign-in App Registration.
-// ENTRA_CLIENT_SECRET must belong to this Client ID.
+// This is the TokenScope user sign-in application.
+// It is separate from the GitHub deployment identity.
 
 param entraIdClientId = '1d51bb60-1d9b-4d5b-8bbb-6096d583d4af'
 param entraIdTenantId = '6c637512-c417-4e78-9d62-b61258e4b619'
 
-// Updated after the DEMO Front Door endpoint is created.
-
 param entraIdRedirectUri = 'https://ep-tokenscopeigdcdemo-dev-weu-d0c2adg4hqcrgfcb.a03.azurefd.net/auth/entra/callback'
-
 
 param bootstrapAdminEmail = 'manideep.muddagowni@insight.com'
 param allowPersonaOverride = false
 
 // ── Scheduled workers ────────────────────────────────────────────────────
-// Updated to the DEMO Front Door endpoint during the final deployment pass.
 
 param workerBaseUrl = 'https://ep-tokenscopeigdcdemo-dev-weu-d0c2adg4hqcrgfcb.a03.azurefd.net'
 
@@ -87,37 +92,35 @@ param workerBaseUrl = 'https://ep-tokenscopeigdcdemo-dev-weu-d0c2adg4hqcrgfcb.a0
 
 param enablePrivateNetworking = true
 
-// Empty means the template generates the VNet name from projectName,
-// env, and region.
+// Empty means the template generates the VNet name.
 
 param vnetName = ''
 
-// These ranges are separate Azure resources but overlap with DEV.
-// This is acceptable while the VNets remain isolated.
-// Use a different range if DEMO will be peered with DEV or a shared hub.
+// DEMO uses a different CIDR from DEV.
+// This avoids overlap if the environments are later peered.
 
 param vnetAddressSpace = '10.0.1.0/24'
+
 param containerAppsSubnetPrefix = '10.0.1.0/27'
 param privateEndpointsSubnetPrefix = '10.0.1.32/28'
 param amplsSubnetPrefix = '10.0.1.48/28'
 
-// Optional build subnet for a self-hosted runner or ACR Tasks agent pool.
-// Leave empty for the initial deployment unless private image building
-// has already been designed.
+// Leave empty unless a self-hosted runner or private ACR build agent
+// is deployed inside the VNet.
 
 param buildSubnetPrefix = ''
 
-// Create and link Private DNS zone groups for supported Private Endpoints.
+// Register and connect the Private DNS zone groups managed by the template.
 
 param registerDnsZoneGroups = true
 
-// Keep Log Analytics query access public until Azure Monitor Private Link
-// and its required Private DNS zones are configured.
+// Keep Azure Monitor query access public until AMPLS and the required
+// Private DNS configuration are fully validated.
 
 param monitorQueryPrivateOnly = false
 
 // ── Optional landing-zone networking ────────────────────────────────────
-// Uncomment only when these Azure resources are available.
+// Uncomment only when the corresponding Azure resource IDs are available.
 
 // param natGatewayId = '/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Network/natGateways/<nat-gateway>'
 
@@ -131,22 +134,15 @@ param monitorQueryPrivateOnly = false
 
 // param useRemoteGateways = true
 
-// ── Azure Front Door ─────────────────────────────────────────────────────
-// INITIAL DEPLOYMENT:
-// Keep Front Door disabled while creating the private infrastructure and
-// pushing tokenscope:latest into the new DEMO ACR.
+// ── Azure Front Door Premium ─────────────────────────────────────────────
 
 param enableFrontDoor = true
-
-// Premium will be used during the Front Door deployment pass.
-
 param frontDoorSku = 'Premium'
-
-// Generated after Front Door is created.
 
 param frontDoorId = '8d75f4f6-fb93-4225-87f1-e7abb74e31ee'
 
-// Keep managed WAF rules in Log mode during initial validation.
+// Keep managed WAF rules in Log mode during validation.
+// Change to Block only after reviewing legitimate application traffic.
 
 param frontDoorWafManagedRuleAction = 'Log'
 
@@ -156,7 +152,7 @@ param frontDoorWafManagedRuleAction = 'Log'
 
 // param deployAzureMonitorWorkspace = false
 
-// Optional alert notification address.
+// Optional alert email.
 
 // param alertNotificationEmail = 'manideep.muddagowni@insight.com'
 

@@ -248,7 +248,7 @@ param monitorQueryPrivateOnly = false
 // 12. Add TEST Entra callback.
 // 13. Run final TEST deployment.
 
-param enableFrontDoor = false
+param enableFrontDoor = true
 
 param frontDoorSku = 'Premium'
 

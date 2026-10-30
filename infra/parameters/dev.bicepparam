@@ -83,7 +83,10 @@ param amplsSubnetPrefix = '10.0.0.48/28'
 
 // Leave empty until a self-hosted runner or ACR agent-pool subnet is required.
 
-param buildSubnetPrefix = ''
+// Shared private GitHub Actions runner subnet.
+// The networking module will create snet-build.
+
+param buildSubnetPrefix = '10.0.0.64/27'
 
 // The template manages Private DNS zone groups for Key Vault,
 // PostgreSQL, Redis and ACR.

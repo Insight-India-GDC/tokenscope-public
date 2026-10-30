@@ -98,7 +98,7 @@ param githubAppKeyPartnerDemo = readEnvironmentVariable(
 //
 // https://<TEST-FRONT-DOOR-HOSTNAME>
 
-param appPublicOrigin = ''
+param appPublicOrigin = 'https://ep-tokenscopeigdctest-dev-weu-ehhfe9fndedtftbx.a03.azurefd.net'
 
 // ── Microsoft Entra ID authentication ───────────────────────────────────
 //
@@ -125,7 +125,7 @@ param entraIdTenantId = '6c637512-c417-4e78-9d62-b61258e4b619'
 //
 // https://<TEST-FRONT-DOOR-HOSTNAME>/auth/entra/callback
 
-param entraIdRedirectUri = ''
+param entraIdRedirectUri = 'https://ep-tokenscopeigdctest-dev-weu-ehhfe9fndedtftbx.a03.azurefd.net/auth/entra/callback'
 
 param bootstrapAdminEmail = 'manideep.muddagowni@insight.com'
 
@@ -141,7 +141,7 @@ param allowPersonaOverride = false
 //
 // https://<TEST-FRONT-DOOR-HOSTNAME>
 
-param workerBaseUrl = ''
+param workerBaseUrl = 'https://ep-tokenscopeigdctest-dev-weu-ehhfe9fndedtftbx.a03.azurefd.net'
 
 // ── Private networking ───────────────────────────────────────────────────
 
@@ -258,7 +258,7 @@ param frontDoorSku = 'Premium'
 //
 // param frontDoorId = '<TEST-FRONT-DOOR-ID>'
 
-param frontDoorId = ''
+param frontDoorId = '8e4c240f-1a81-4462-a254-cbcf6b150b8e'
 
 // Keep WAF managed rules in Log during initial TEST validation.
 //

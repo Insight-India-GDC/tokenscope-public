@@ -16,6 +16,7 @@ jobs:
       - self-hosted
       - Linux
       - X64
+      - tokenscope-dev
 
     environment: dev
     timeout-minutes: 45

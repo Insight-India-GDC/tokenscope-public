@@ -1,253 +1,145 @@
-name: Build and Deploy TokenScope TEST Image
+name: Build Known-Good DEV Commit for TokenScope TEST
 
 on:
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: "Approved Git commit SHA or tag to deploy to TEST"
-        required: true
-        type: string
 
 permissions:
   id-token: write
   contents: read
 
-concurrency:
-  group: tokenscope-test-image
-  cancel-in-progress: false
-
 jobs:
+  build-push-deploy:
+    name: Build and Deploy Known-Good Commit to TEST
 
-  # ============================================================
-  # JOB 1: Validate requested TEST version
-  #
-  # No TEST secrets are required here.
-  # ============================================================
-
-  validate:
-    name: Validate TEST Image Request
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 10
-
-    steps:
-
-      # --------------------------------------------------------
-      # STEP 1: Validate source_ref
-      # --------------------------------------------------------
-
-      - name: Validate TEST Source Reference
-        shell: bash
-        env:
-          SOURCE_REF: ${{ inputs.source_ref }}
-
-        run: |
-          set -euo pipefail
-
-          if [ -z "$SOURCE_REF" ]; then
-            echo "ERROR: source_ref is required."
-            exit 1
-          fi
-
-          echo "=========================================="
-          echo "TokenScope TEST Image Promotion"
-          echo "=========================================="
-
-          echo "Requested source reference:"
-          echo "$SOURCE_REF"
-
-          echo "SUCCESS: TEST source reference provided."
-
-
-  # ============================================================
-  # JOB 2: Build, push and deploy to TEST
-  #
-  # IMPORTANT:
-  #
-  # environment: test
-  #
-  # activates:
-  #
-  # Settings
-  # → Environments
-  # → test
-  # → Required reviewers
-  #
-  # Because Prevent self-review is enabled, the person who
-  # starts this workflow cannot approve this deployment.
-  # ============================================================
-
-  deploy:
-    name: Build, Push and Deploy TEST
-
-    needs: validate
-
-    environment: test
-
+    # TEST uses the private self-hosted runner because
+    # TEST ACR will be private.
     runs-on:
       - self-hosted
       - Linux
       - X64
       - tokenscope-test
 
-    timeout-minutes: 60
+    # IMPORTANT:
+    # Uses GitHub:
+    # Settings → Environments → test
+    #
+    # Required reviewers configured on TEST apply here.
+    environment: test
+
+    timeout-minutes: 45
 
     env:
+      AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-test-helios-001
 
-      # --------------------------------------------------------
-      # Azure TEST target
-      # --------------------------------------------------------
+      EXPECTED_SUBSCRIPTION: a4924ab9-f91e-4235-a611-8b1c3cfb9a7f
 
-      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-
-      EXPECTED_SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      ACR_NAME: ${{ vars.ACR_NAME }}
-
-      CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
+      ACR_NAME: crtokenscopeigdctestdevweu
 
       IMAGE_NAME: tokenscope
 
+      CONTAINER_APP_NAME: ca-tokenscopeigdctest-dev-weu
+
+      # Exact application commit currently known to work in DEV.
+      #
+      # For the first TEST deployment, keep this fixed.
+      # Later you can replace this with the newly approved DEV SHA.
+      IMAGE_TAG: 308dde71df94ef0d049ac260b7067b277e28185a
 
     steps:
 
-      # ========================================================
-      # STEP 2: Checkout the exact approved source
-      # ========================================================
+      # ============================================================
+      # STEP 1: Checkout exact known-good DEV commit
+      # ============================================================
 
-      - name: Checkout Approved TEST Source
+      - name: Checkout Known-Good DEV Commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
         with:
-          ref: ${{ inputs.source_ref }}
-          fetch-depth: 1
+          ref: 308dde71df94ef0d049ac260b7067b277e28185a
 
 
-      # ========================================================
-      # STEP 3: Azure Login using TEST OIDC identity
-      # ========================================================
+      # ============================================================
+      # STEP 2: Azure Login using TEST OIDC identity
+      #
+      # AZURE_CLIENT_ID comes from:
+      #
+      # GitHub
+      # → Settings
+      # → Environments
+      # → test
+      #
+      # It should be the Client ID for:
+      #
+      # tokenscope-github-test-deployer
+      # ============================================================
 
       - name: Azure Login using TEST OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
-
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
 
-      # ========================================================
-      # STEP 4: Resolve exact immutable Git commit
-      # ========================================================
+      # ============================================================
+      # STEP 3: Validate TEST subscription
+      # ============================================================
 
-      - name: Resolve Immutable TEST Image Tag
+      - name: Verify TEST Subscription
         shell: bash
-
         run: |
           set -euo pipefail
 
-          RESOLVED_SHA=$(git rev-parse HEAD)
-
-          if [ -z "$RESOLVED_SHA" ]; then
-            echo "ERROR: Unable to resolve Git commit SHA."
-            exit 1
-          fi
-
-          echo "RESOLVED_SHA=$RESOLVED_SHA" >> "$GITHUB_ENV"
-
-          echo "=========================================="
-          echo "TEST Source Resolution"
-          echo "=========================================="
-
-          echo "Requested source:"
-          echo "${{ inputs.source_ref }}"
-
-          echo "Resolved commit:"
-          echo "$RESOLVED_SHA"
-
-          echo "SUCCESS: Immutable TEST image tag resolved."
-
-
-      # ========================================================
-      # STEP 5: Verify the private TEST runner
-      # ========================================================
-
-      - name: Verify TEST Private Runner
-        shell: bash
-
-        run: |
-          set -euo pipefail
-
-          echo "=========================================="
-          echo "TokenScope TEST Private Runner"
-          echo "=========================================="
-
-          echo "Runner Name:"
-          echo "$RUNNER_NAME"
-
-          echo "Runner OS:"
-          echo "$RUNNER_OS"
-
-          echo "Hostname:"
-          hostname
-
-          echo ""
-          echo "Docker:"
-          docker --version
-
-          echo ""
-          echo "Azure CLI:"
-          az version
-
-          echo ""
-          echo "Git:"
-          git --version
-
-          docker info > /dev/null
-
-          echo ""
-          echo "SUCCESS: TEST private runner validated."
-
-
-      # ========================================================
-      # STEP 6: Verify Azure subscription
-      # ========================================================
-
-      - name: Verify TEST Azure Subscription
-        shell: bash
-
-        run: |
-          set -euo pipefail
-
-          ACTUAL_SUBSCRIPTION=$(az account show \
+          ACTUAL_SUB=$(az account show \
             --query id \
             --output tsv)
 
-          echo "Expected Subscription:"
-          echo "$EXPECTED_SUBSCRIPTION"
+          if [ "$ACTUAL_SUB" != "$EXPECTED_SUBSCRIPTION" ]; then
 
-          echo "Actual Subscription:"
-          echo "$ACTUAL_SUBSCRIPTION"
+            echo "ERROR: Wrong Azure subscription."
 
-          if [ "$ACTUAL_SUBSCRIPTION" != "$EXPECTED_SUBSCRIPTION" ]; then
+            echo "Expected:"
+            echo "$EXPECTED_SUBSCRIPTION"
 
-            echo "ERROR: Workflow authenticated to the wrong subscription."
+            echo "Actual:"
+            echo "$ACTUAL_SUB"
 
             exit 1
 
           fi
 
-          echo "SUCCESS: TEST Azure subscription validated."
+          echo "SUCCESS: TEST subscription validated."
 
 
-      # ========================================================
-      # STEP 7: Verify TEST Resource Group
-      # ========================================================
+      # ============================================================
+      # STEP 4: Validate TEST target values
+      #
+      # These checks intentionally prevent this TEST workflow
+      # from accidentally touching DEV or DEMO.
+      # ============================================================
+
+      - name: Verify TEST Target Values
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$AZURE_RESOURCE_GROUP" = \
+            "rg-westeurope-t1-amd-test-helios-001"
+
+          test "$ACR_NAME" = \
+            "crtokenscopeigdctestdevweu"
+
+          test "$CONTAINER_APP_NAME" = \
+            "ca-tokenscopeigdctest-dev-weu"
+
+          echo "SUCCESS: TEST target values validated."
+
+
+      # ============================================================
+      # STEP 5: Verify TEST Resource Group
+      # ============================================================
 
       - name: Verify TEST Resource Group
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -261,23 +153,14 @@ jobs:
           echo "SUCCESS: TEST Resource Group exists."
 
 
-      # ========================================================
-      # STEP 8: Verify TEST ACR
-      # ========================================================
+      # ============================================================
+      # STEP 6: Verify TEST ACR exists
+      # ============================================================
 
       - name: Verify TEST ACR
         shell: bash
-
         run: |
           set -euo pipefail
-
-          if [ -z "$ACR_NAME" ]; then
-
-            echo "ERROR: GitHub TEST variable ACR_NAME is empty."
-
-            exit 1
-
-          fi
 
           echo "TEST ACR:"
           echo "$ACR_NAME"
@@ -290,23 +173,14 @@ jobs:
           echo "SUCCESS: TEST ACR exists."
 
 
-      # ========================================================
-      # STEP 9: Verify TEST Container App
-      # ========================================================
+      # ============================================================
+      # STEP 7: Verify TEST Container App exists
+      # ============================================================
 
       - name: Verify TEST Container App
         shell: bash
-
         run: |
           set -euo pipefail
-
-          if [ -z "$CONTAINER_APP_NAME" ]; then
-
-            echo "ERROR: GitHub TEST variable CONTAINER_APP_NAME is empty."
-
-            exit 1
-
-          fi
 
           echo "TEST Container App:"
           echo "$CONTAINER_APP_NAME"
@@ -319,64 +193,108 @@ jobs:
           echo "SUCCESS: TEST Container App exists."
 
 
-      # ========================================================
-      # STEP 10: Verify private TEST ACR DNS
-      #
-      # This is important because ACR Public Network Access
-      # should eventually remain Disabled.
-      # ========================================================
+      # ============================================================
+      # STEP 8: Verify private TEST runner
+      # ============================================================
 
-      - name: Verify TEST ACR Private DNS
+      - name: Verify TEST Private Runner
         shell: bash
-
         run: |
           set -euo pipefail
 
-          ACR_HOST="${ACR_NAME}.azurecr.io"
+          echo "=========================================="
+          echo "TEST Private Runner"
+          echo "=========================================="
+
+          echo "Runner name:"
+          echo "$RUNNER_NAME"
+
+          echo "Runner OS:"
+          echo "$RUNNER_OS"
+
+          echo "Hostname:"
+          hostname
+
+          echo ""
+          echo "Docker:"
+
+          docker --version
+
+          docker info > /dev/null
+
+          echo ""
+          echo "Azure CLI:"
+
+          az version
+
+          echo ""
+          echo "Git:"
+
+          git --version
+
+          echo ""
+
+          echo "SUCCESS: TEST private runner validated."
+
+
+      # ============================================================
+      # STEP 9: Verify TEST ACR private DNS
+      #
+      # Expected:
+      #
+      # crtokenscopeigdctestdevweu.azurecr.io
+      #
+      # should ultimately resolve to a PRIVATE IP.
+      # ============================================================
+
+      - name: Verify TEST ACR Private DNS
+        shell: bash
+        run: |
+          set -euo pipefail
 
           echo "=========================================="
           echo "TEST ACR Private DNS"
           echo "=========================================="
 
           echo "Resolving:"
-          echo "$ACR_HOST"
+          echo "${ACR_NAME}.azurecr.io"
 
-          getent hosts "$ACR_HOST"
+          getent hosts "${ACR_NAME}.azurecr.io"
 
           echo ""
 
-          echo "SUCCESS: TEST ACR DNS resolution completed."
+          echo "SUCCESS: TEST ACR private DNS lookup completed."
 
 
-      # ========================================================
-      # STEP 11: Verify TEST ACR security posture
-      # ========================================================
+      # ============================================================
+      # STEP 10: Display TEST ACR security posture
+      # ============================================================
 
-      - name: Show TEST ACR Network Configuration
+      - name: Show TEST ACR Configuration
         shell: bash
-
         run: |
           set -euo pipefail
 
           az acr show \
             --name "$ACR_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query "{
-              Name:name,
-              Sku:sku.name,
-              PublicNetworkAccess:publicNetworkAccess,
-              AdminUser:adminUserEnabled
-            }" \
+            --query "{Name:name,Sku:sku.name,PublicNetworkAccess:publicNetworkAccess,AdminUser:adminUserEnabled}" \
             --output table
 
 
-      # ========================================================
-      # STEP 12: Login to private TEST ACR
-      # ========================================================
+      # ============================================================
+      # STEP 11: Login to TEST ACR
+      #
+      # Authentication:
+      #
+      # GitHub OIDC
+      # → tokenscope-github-test-deployer
+      # → AcrPush
+      # → TEST ACR
+      # ============================================================
 
       - name: Login to Private TEST ACR
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -394,13 +312,12 @@ jobs:
           echo "SUCCESS: Logged into private TEST ACR."
 
 
-      # ========================================================
-      # STEP 13: Build TEST Docker image
-      # ========================================================
+      # ============================================================
+      # STEP 12: Build the exact known-good image
+      # ============================================================
 
-      - name: Build TEST Docker Image
+      - name: Build Known-Good TEST Docker Image
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -410,108 +327,58 @@ jobs:
           echo "Building TEST Image"
           echo "=========================================="
 
-          echo "Immutable image:"
-          echo "${IMAGE}:${RESOLVED_SHA}"
-
-          echo "Latest image:"
-          echo "${IMAGE}:latest"
+          echo "Image:"
+          echo "${IMAGE}:${IMAGE_TAG}"
 
           docker build \
-            --pull \
-            -t "${IMAGE}:${RESOLVED_SHA}" \
-            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${IMAGE_TAG}" \
             .
 
-          echo "SUCCESS: TEST Docker image built."
+          echo "SUCCESS: Known-good TEST Docker image built."
 
 
-      # ========================================================
-      # STEP 14: Push immutable TEST image
-      # ========================================================
+      # ============================================================
+      # STEP 13: Push known-good image to TEST ACR
+      # ============================================================
 
-      - name: Push Immutable TEST Image
+      - name: Push Known-Good TEST Docker Image
         shell: bash
-
         run: |
           set -euo pipefail
 
           IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
 
           echo "Pushing:"
-          echo "${IMAGE}:${RESOLVED_SHA}"
+          echo "${IMAGE}:${IMAGE_TAG}"
 
-          docker push "${IMAGE}:${RESOLVED_SHA}"
+          docker push "${IMAGE}:${IMAGE_TAG}"
 
-          echo "SUCCESS: Immutable TEST image pushed."
+          echo "SUCCESS: Known-good TEST image pushed."
 
 
-      # ========================================================
-      # STEP 15: Push latest TEST image
-      #
-      # latest is maintained for bootstrap/convenience.
-      #
-      # Deployment itself will use the immutable SHA.
-      # ========================================================
+      # ============================================================
+      # STEP 14: Verify known-good image exists
+      # ============================================================
 
-      - name: Push TEST Latest Image
+      - name: Verify Known-Good TEST Image
         shell: bash
-
-        run: |
-          set -euo pipefail
-
-          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
-
-          echo "Pushing:"
-          echo "${IMAGE}:latest"
-
-          docker push "${IMAGE}:latest"
-
-          echo "SUCCESS: TEST latest image pushed."
-
-
-      # ========================================================
-      # STEP 16: Verify immutable TEST image exists
-      # ========================================================
-
-      - name: Verify Immutable TEST Image
-        shell: bash
-
         run: |
           set -euo pipefail
 
           az acr repository show \
             --name "$ACR_NAME" \
-            --image "${IMAGE_NAME}:${RESOLVED_SHA}" \
+            --image "${IMAGE_NAME}:${IMAGE_TAG}" \
             --output none
 
-          echo "SUCCESS: Immutable TEST image verified."
+          echo "SUCCESS: Known-good TEST image exists in TEST ACR."
 
 
-      # ========================================================
-      # STEP 17: Verify latest TEST image exists
-      # ========================================================
-
-      - name: Verify TEST Latest Image
-        shell: bash
-
-        run: |
-          set -euo pipefail
-
-          az acr repository show \
-            --name "$ACR_NAME" \
-            --image "${IMAGE_NAME}:latest" \
-            --output none
-
-          echo "SUCCESS: TEST latest image verified."
-
-
-      # ========================================================
-      # STEP 18: Display TEST image tags
-      # ========================================================
+      # ============================================================
+      # STEP 15: Show TEST ACR tags
+      # ============================================================
 
       - name: Show TEST Image Tags
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -521,20 +388,19 @@ jobs:
             --output table
 
 
-      # ========================================================
-      # STEP 19: Update TEST Container App using immutable SHA
-      # ========================================================
+      # ============================================================
+      # STEP 16: Update TEST Container App
+      # ============================================================
 
       - name: Update TEST Container App
         shell: bash
-
         run: |
           set -euo pipefail
 
-          TEST_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${RESOLVED_SHA}"
+          TEST_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
 
           echo "=========================================="
-          echo "Updating TEST Container App"
+          echo "Deploying Known-Good Image to TEST"
           echo "=========================================="
 
           echo "Container App:"
@@ -549,20 +415,17 @@ jobs:
             --image "$TEST_IMAGE" \
             --output none
 
-          echo "SUCCESS: TEST Container App updated."
+          echo "SUCCESS: Known-good DEV commit deployed to TEST."
 
 
-      # ========================================================
-      # STEP 20: Verify exact image deployed
-      # ========================================================
+      # ============================================================
+      # STEP 17: Verify exact TEST image
+      # ============================================================
 
       - name: Verify Deployed TEST Image
         shell: bash
-
         run: |
           set -euo pipefail
-
-          EXPECTED_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${RESOLVED_SHA}"
 
           DEPLOYED_IMAGE=$(az containerapp show \
             --name "$CONTAINER_APP_NAME" \
@@ -570,70 +433,54 @@ jobs:
             --query "properties.template.containers[0].image" \
             --output tsv)
 
-          echo "Expected Image:"
+          EXPECTED_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          echo "Expected:"
           echo "$EXPECTED_IMAGE"
 
           echo ""
 
-          echo "Deployed Image:"
+          echo "Deployed:"
           echo "$DEPLOYED_IMAGE"
 
           if [ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]; then
 
-            echo "ERROR: TEST Container App is using the wrong image."
+            echo "ERROR: TEST is not running the expected image."
 
             exit 1
 
           fi
 
-          echo "SUCCESS: Correct immutable TEST image deployed."
+          echo "SUCCESS: TEST is running the known-good DEV commit."
 
 
-      # ========================================================
-      # STEP 21: Verify TEST revisions
-      # ========================================================
+      # ============================================================
+      # STEP 18: Verify TEST Container App revisions
+      # ============================================================
 
       - name: Verify TEST Container App Revisions
         shell: bash
-
         run: |
           set -euo pipefail
 
           az containerapp revision list \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query "[].{
-              Name:name,
-              Active:properties.active,
-              Health:properties.healthState,
-              Provisioning:properties.provisioningState
-            }" \
             --output table
 
 
-      # ========================================================
-      # STEP 22: Final deployment summary
-      # ========================================================
+      # ============================================================
+      # STEP 19: Final TEST deployment summary
+      # ============================================================
 
-      - name: TEST Image Deployment Summary
+      - name: TEST Deployment Summary
         shell: bash
-
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "TokenScope TEST Image Deployment Complete"
+          echo "TokenScope TEST Image Deployment"
           echo "=========================================="
-
-          echo ""
-
-          echo "Source Ref:"
-          echo "${{ inputs.source_ref }}"
-
-          echo ""
-
-          echo "Resolved Commit SHA:"
-          echo "$RESOLVED_SHA"
 
           echo ""
 
@@ -652,17 +499,25 @@ jobs:
 
           echo ""
 
+          echo "Known-Good Commit:"
+          echo "$IMAGE_TAG"
+
+          echo ""
+
           echo "Deployed Image:"
-          echo "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${RESOLVED_SHA}"
+          echo "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          echo ""
+
+          echo "SUCCESS: TEST image deployment completed."
 
 
-      # ========================================================
-      # STEP 23: Logout
-      # ========================================================
+      # ============================================================
+      # STEP 20: Logout
+      # ============================================================
 
       - name: Azure Logout
         if: always()
         shell: bash
-
         run: |
           az logout || true

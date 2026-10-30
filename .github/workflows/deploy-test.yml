@@ -1,4 +1,4 @@
-name: Deploy TokenScope TEST
+name: Deploy TokenScope TEST - Complete
 
 on:
   workflow_dispatch:
@@ -8,370 +8,178 @@ permissions:
   contents: read
 
 concurrency:
-  group: tokenscope-test-infrastructure
+  group: tokenscope-test-complete
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Deploy TokenScope TEST Infrastructure
-    runs-on: ubuntu-latest
-
-    # IMPORTANT:
-    # This makes GitHub use variables and secrets from:
-    #
-    # Settings
-    # → Environments
-    # → test
-    #
-    # It also activates TEST Required Reviewers.
+    name: Build Image and Deploy TEST Infrastructure
+    # Uses the known existing DEV private runner. It must have private DNS and
+    # network access to TEST ACR. Replace tokenscope-dev with tokenscope-test
+    # only when that separate runner is registered and has Docker installed.
+    runs-on: [self-hosted, Linux, X64, tokenscope-dev]
     environment: test
+    timeout-minutes: 120
 
-    timeout-minutes: 90
+    env:
+      AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-test-helios-001
+      EXPECTED_SUBSCRIPTION: a4924ab9-f91e-4235-a611-8b1c3cfb9a7f
+      ACR_NAME: crtokenscopeigdctestdevweu
+      IMAGE_NAME: tokenscope
+      CONTAINER_APP_NAME: ca-tokenscopeigdctest-dev-weu
+      PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+      PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+      SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+      INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+      OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+      OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+      OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+      ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_PAT_PARTNER_DEMO: ${{ secrets.GH_PAT_PARTNER_DEMO }}
+      GH_PAT_PRODUCTION: ${{ secrets.GH_PAT_PRODUCTION }}
+      GH_PAT_ENTERPRISE_NFR: ${{ secrets.GH_PAT_ENTERPRISE_NFR }}
+      GH_APP_KEY_PARTNER_DEMO: ${{ secrets.GH_APP_KEY_PARTNER_DEMO }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      # ------------------------------------------------------------
-      # STEP 1: Checkout repository
-      # ------------------------------------------------------------
-
-      - name: Checkout Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-
-      # ------------------------------------------------------------
-      # STEP 2: Azure Login using TEST GitHub OIDC
-      # ------------------------------------------------------------
-
-      - name: Azure Login
+      - name: Azure Login using TEST OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-
-      # ------------------------------------------------------------
-      # STEP 3: Verify TEST target
-      # ------------------------------------------------------------
-
-      - name: Verify TEST Deployment Target
+      - name: Validate TEST target and required secrets
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "=========================================="
-          echo "TokenScope TEST Deployment Target"
-          echo "=========================================="
-
-          echo "Resource Group: ${{ vars.AZURE_RESOURCE_GROUP }}"
-          echo "Location:       ${{ vars.AZURE_LOCATION }}"
-
-          ACTUAL_SUBSCRIPTION=$(az account show \
-            --query id \
-            --output tsv)
-
-          EXPECTED_SUBSCRIPTION="${{ vars.AZURE_SUBSCRIPTION_ID }}"
-
-          echo "Expected Subscription: $EXPECTED_SUBSCRIPTION"
-          echo "Actual Subscription:   $ACTUAL_SUBSCRIPTION"
-
-          if [ "$ACTUAL_SUBSCRIPTION" != "$EXPECTED_SUBSCRIPTION" ]; then
-            echo "ERROR: Wrong Azure subscription."
-            exit 1
-          fi
-
-          az group show \
-            --name "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --output table
-
-          echo "SUCCESS: TEST deployment target validated."
-
-
-      # ------------------------------------------------------------
-      # STEP 4: Validate OIDC secret formats
-      # ------------------------------------------------------------
-
-      - name: Validate OIDC Secret Formats
-        env:
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          import os
-          import base64
-          import binascii
-
-          for name in (
-              "OIDC_SESSION_SECRET",
-              "OIDC_AUTH_SESSION_SECRET"
-          ):
-              value = os.environ.get(name, "")
-
-              if len(value) < 48:
-                  raise SystemExit(
-                      f"ERROR: {name} must contain at least 48 characters"
-                  )
-
-              print(f"PASS: {name} format valid")
-
-          key = os.environ.get("OIDC_TOKEN_KEY", "")
-
-          try:
-              decoded = base64.b64decode(
-                  key,
-                  validate=True
-              )
-          except (binascii.Error, ValueError):
-              raise SystemExit(
-                  "ERROR: OIDC_TOKEN_KEY must be valid Base64"
-              )
-
-          if len(decoded) != 32:
-              raise SystemExit(
-                  "ERROR: OIDC_TOKEN_KEY must decode to exactly 32 bytes"
-              )
-
-          print("PASS: OIDC_TOKEN_KEY format valid")
-          print("SUCCESS: All TEST OIDC secrets passed validation")
-          PY
-
-
-      # ------------------------------------------------------------
-      # STEP 5: Validate required TEST secrets
-      # ------------------------------------------------------------
-
-      - name: Validate Required TEST Secrets
-        env:
-          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
-          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
-          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-
-          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
-
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          required=(
-            PG_ADMIN_LOGIN
-            PG_ADMIN_PASSWORD
-            SESSION_SECRET
-            HMAC_SESSION_KEY
-            INTERNAL_WORKER_HMAC_KEY
-            OIDC_SESSION_SECRET
-            OIDC_AUTH_SESSION_SECRET
-            OIDC_TOKEN_KEY
-            ENTRA_CLIENT_SECRET
-          )
-
-          for name in "${required[@]}"; do
-
+          actual="$(az account show --query id -o tsv)"
+          test "$actual" = "$EXPECTED_SUBSCRIPTION" || {
+            echo "ERROR: Wrong subscription ($actual)"; exit 1;
+          }
+          test "${{ vars.AZURE_SUBSCRIPTION_ID }}" = "$EXPECTED_SUBSCRIPTION" || {
+            echo "ERROR: TEST environment subscription variable mismatch"; exit 1;
+          }
+          for name in PG_ADMIN_LOGIN PG_ADMIN_PASSWORD SESSION_SECRET HMAC_SESSION_KEY \
+                      INTERNAL_WORKER_HMAC_KEY OIDC_SESSION_SECRET \
+                      OIDC_AUTH_SESSION_SECRET OIDC_TOKEN_KEY ENTRA_CLIENT_SECRET; do
             if [ -z "${!name}" ]; then
-              echo "ERROR: Missing GitHub TEST environment secret: $name"
+              echo "ERROR: Missing TEST environment secret: $name"
               exit 1
             fi
-
           done
+          python3 - <<'PY'
+          import os, base64, binascii
+          for name in ('OIDC_SESSION_SECRET', 'OIDC_AUTH_SESSION_SECRET'):
+              if len(os.environ[name]) < 48:
+                  raise SystemExit(f'ERROR: {name} must be at least 48 characters')
+          try:
+              raw = base64.b64decode(os.environ['OIDC_TOKEN_KEY'], validate=True)
+          except (binascii.Error, ValueError):
+              raise SystemExit('ERROR: OIDC_TOKEN_KEY must be valid Base64')
+          if len(raw) != 32:
+              raise SystemExit('ERROR: OIDC_TOKEN_KEY must decode to 32 bytes')
+          print('SUCCESS: Required TEST secrets and OIDC formats validated')
+          PY
+          az group show --name "$AZURE_RESOURCE_GROUP" -o none
+          az acr show --name "$ACR_NAME" --resource-group "$AZURE_RESOURCE_GROUP" -o none
+          echo "Runner: $RUNNER_NAME / $(hostname)"
+          echo 'SUCCESS: TEST Azure target validated'
 
-          echo "SUCCESS: Required TEST secrets are available"
-
-
-      # ------------------------------------------------------------
-      # STEP 6: Verify deployment identity
-      # ------------------------------------------------------------
-
-      - name: Verify TEST Deployment Identity
+      - name: Validate Docker and private TEST ACR access
         shell: bash
         run: |
           set -euo pipefail
+          docker info >/dev/null
+          echo "Resolving ${ACR_NAME}.azurecr.io"
+          getent ahostsv4 "${ACR_NAME}.azurecr.io"
+          # A 401 from /v2/ is normal before authentication.
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            --connect-timeout 10 --max-time 30 \
+            "https://${ACR_NAME}.azurecr.io/v2/")"
+          case "$status" in
+            200|401) echo "SUCCESS: TEST ACR HTTPS reachable (HTTP $status)" ;;
+            *) echo "ERROR: TEST ACR HTTPS returned HTTP $status"; exit 1 ;;
+          esac
+          az acr login --name "$ACR_NAME"
+          echo 'SUCCESS: Authenticated to TEST ACR'
 
-          echo "Expected TEST Client ID:"
-          echo "${{ vars.AZURE_CLIENT_ID }}"
-
-          echo "Current Azure identity:"
-          az account show \
-            --query "{Subscription:name,SubscriptionId:id,TenantId:tenantId}" \
-            --output table
-
-          echo "SUCCESS: TEST Azure identity authenticated."
-
-
-      # ------------------------------------------------------------
-      # STEP 7: Validate Bicep templates
-      # ------------------------------------------------------------
-
-      - name: Validate TEST Bicep Templates
-        env:
-          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
-          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
-          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-
-          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
-
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-          GH_PAT_PARTNER_DEMO: ${{ secrets.GH_PAT_PARTNER_DEMO }}
-          GH_PAT_PRODUCTION: ${{ secrets.GH_PAT_PRODUCTION }}
-          GH_PAT_ENTERPRISE_NFR: ${{ secrets.GH_PAT_ENTERPRISE_NFR }}
-          GH_APP_KEY_PARTNER_DEMO: ${{ secrets.GH_APP_KEY_PARTNER_DEMO }}
-
+      - name: Validate TEST Bicep templates
         shell: bash
         run: |
           set -euo pipefail
+          az bicep build --file infra/main.bicep --stdout >/dev/null
+          az bicep build-params --file infra/parameters/test.bicepparam --stdout >/dev/null
+          echo 'SUCCESS: TEST Bicep validation completed'
 
-          echo "Validating TokenScope TEST Bicep templates..."
-
-          az bicep build \
-            --file infra/main.bicep \
-            --stdout > /dev/null
-
-          az bicep build-params \
-            --file infra/parameters/test.bicepparam \
-            --stdout > /dev/null
-
-          echo "SUCCESS: TEST Bicep validation completed"
-
-
-      # ------------------------------------------------------------
-      # STEP 8: TEST deployment preview
-      # ------------------------------------------------------------
-
-      - name: Preview TEST Infrastructure Changes
-        env:
-          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
-          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
-          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-
-          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
-
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-          GH_PAT_PARTNER_DEMO: ${{ secrets.GH_PAT_PARTNER_DEMO }}
-          GH_PAT_PRODUCTION: ${{ secrets.GH_PAT_PRODUCTION }}
-          GH_PAT_ENTERPRISE_NFR: ${{ secrets.GH_PAT_ENTERPRISE_NFR }}
-          GH_APP_KEY_PARTNER_DEMO: ${{ secrets.GH_APP_KEY_PARTNER_DEMO }}
-
+      - name: Build and push TEST Docker image
         shell: bash
         run: |
           set -euo pipefail
+          image="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
+          docker build \
+            -t "${image}:${GITHUB_SHA}" \
+            -t "${image}:latest" \
+            .
+          docker push "${image}:${GITHUB_SHA}"
+          docker push "${image}:latest"
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "${IMAGE_NAME}:${GITHUB_SHA}" -o none
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "${IMAGE_NAME}:latest" -o none
+          echo 'SUCCESS: TEST images pushed and verified'
 
-          echo "Previewing TEST infrastructure changes..."
-
+      - name: Preview TEST infrastructure changes
+        shell: bash
+        run: |
+          set -euo pipefail
           az deployment group what-if \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
             --template-file infra/main.bicep \
             --parameters infra/parameters/test.bicepparam
 
-          echo "SUCCESS: TEST deployment preview completed"
-
-
-      # ------------------------------------------------------------
-      # STEP 9: Deploy TEST infrastructure
-      # ------------------------------------------------------------
-
-      - name: Deploy TEST Infrastructure
-        env:
-          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
-          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
-          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-
-          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
-
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-          GH_PAT_PARTNER_DEMO: ${{ secrets.GH_PAT_PARTNER_DEMO }}
-          GH_PAT_PRODUCTION: ${{ secrets.GH_PAT_PRODUCTION }}
-          GH_PAT_ENTERPRISE_NFR: ${{ secrets.GH_PAT_ENTERPRISE_NFR }}
-          GH_APP_KEY_PARTNER_DEMO: ${{ secrets.GH_APP_KEY_PARTNER_DEMO }}
-
+      - name: Deploy TEST infrastructure
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Starting TokenScope TEST infrastructure deployment..."
-
           az deployment group create \
             --name main \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
             --template-file infra/main.bicep \
             --parameters infra/parameters/test.bicepparam \
             --only-show-errors
+          echo 'SUCCESS: TEST infrastructure deployed'
 
-          echo "SUCCESS: TokenScope TEST infrastructure deployment completed"
-
-
-      # ------------------------------------------------------------
-      # STEP 10: Show deployment outputs
-      # ------------------------------------------------------------
-
-      - name: Show TEST Deployment Outputs
-        if: success()
+      - name: Deploy immutable TEST image
         shell: bash
         run: |
           set -euo pipefail
-
-          az deployment group show \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --name main \
-            --query properties.outputs \
-            --output json
-
-
-      # ------------------------------------------------------------
-      # STEP 11: List TEST resources
-      # ------------------------------------------------------------
-
-      - name: List TEST Resources
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          az resource list \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --query "[].{Name:name,Type:type,Location:location}" \
+          image="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}"
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "$image" \
+            --output none
+          deployed="$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' -o tsv)"
+          test "$deployed" = "$image" || {
+            echo "ERROR: Unexpected deployed image: $deployed"; exit 1;
+          }
+          echo "SUCCESS: TEST app configured for $deployed"
+          az containerapp revision list \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
-
-
-      # ------------------------------------------------------------
-      # STEP 12: Logout
-      # ------------------------------------------------------------
 
       - name: Azure Logout
         if: always()
         shell: bash
-        run: |
-          az logout || true
+        run: az logout || true

@@ -1,4 +1,4 @@
-name: Build Known-Good DEV Commit for TokenScope TEST
+name: Build and Deploy Selected Commit to TokenScope TEST
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-push-deploy:
-    name: Build and Deploy Known-Good Commit to TEST
+    name: Build and Deploy Selected Commit to TEST
 
     # TEST uses the private self-hosted runner because
     # TEST ACR will be private.
@@ -39,22 +39,17 @@ jobs:
 
       CONTAINER_APP_NAME: ca-tokenscopeigdctest-dev-weu
 
-      # Exact application commit currently known to work in DEV.
-      #
-      # For the first TEST deployment, keep this fixed.
-      # Later you can replace this with the newly approved DEV SHA.
-      IMAGE_TAG: 308dde71df94ef0d049ac260b7067b277e28185a
+      # Immutable image tag for the commit selected when running this workflow.
+      IMAGE_TAG: ${{ github.sha }}
 
     steps:
 
       # ============================================================
-      # STEP 1: Checkout exact known-good DEV commit
+      # STEP 1: Checkout the commit selected in Actions -> Run workflow
       # ============================================================
 
-      - name: Checkout Known-Good DEV Commit
+      - name: Checkout Selected Commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 308dde71df94ef0d049ac260b7067b277e28185a
 
 
       # ============================================================
@@ -316,7 +311,7 @@ jobs:
       # STEP 12: Build the exact known-good image
       # ============================================================
 
-      - name: Build Known-Good TEST Docker Image
+      - name: Build Selected-Commit TEST Docker Image
         shell: bash
         run: |
           set -euo pipefail
@@ -334,14 +329,14 @@ jobs:
             -t "${IMAGE}:${IMAGE_TAG}" \
             .
 
-          echo "SUCCESS: Known-good TEST Docker image built."
+          echo "SUCCESS: Selected-commit TEST Docker image built."
 
 
       # ============================================================
       # STEP 13: Push known-good image to TEST ACR
       # ============================================================
 
-      - name: Push Known-Good TEST Docker Image
+      - name: Push Selected-Commit TEST Docker Image
         shell: bash
         run: |
           set -euo pipefail
@@ -353,14 +348,14 @@ jobs:
 
           docker push "${IMAGE}:${IMAGE_TAG}"
 
-          echo "SUCCESS: Known-good TEST image pushed."
+          echo "SUCCESS: Selected-commit TEST image pushed."
 
 
       # ============================================================
       # STEP 14: Verify known-good image exists
       # ============================================================
 
-      - name: Verify Known-Good TEST Image
+      - name: Verify Selected-Commit TEST Image
         shell: bash
         run: |
           set -euo pipefail
@@ -370,7 +365,7 @@ jobs:
             --image "${IMAGE_NAME}:${IMAGE_TAG}" \
             --output none
 
-          echo "SUCCESS: Known-good TEST image exists in TEST ACR."
+          echo "SUCCESS: Selected-commit TEST image exists in TEST ACR."
 
 
       # ============================================================
@@ -415,7 +410,7 @@ jobs:
             --image "$TEST_IMAGE" \
             --output none
 
-          echo "SUCCESS: Known-good DEV commit deployed to TEST."
+          echo "SUCCESS: Selected commit commit deployed to TEST."
 
 
       # ============================================================
@@ -451,7 +446,7 @@ jobs:
 
           fi
 
-          echo "SUCCESS: TEST is running the known-good DEV commit."
+          echo "SUCCESS: TEST is running the selected commit."
 
 
       # ============================================================
@@ -499,7 +494,7 @@ jobs:
 
           echo ""
 
-          echo "Known-Good Commit:"
+          echo "Selected Commit:"
           echo "$IMAGE_TAG"
 
           echo ""

@@ -1,5 +1,4 @@
-
-name: Deploy TokenScope DEV
+name: Deploy TokenScope DEV Infrastructure (Safe)
 
 on:
   workflow_dispatch:
@@ -8,125 +7,175 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: tokenscope-dev-deployment
+  cancel-in-progress: false
+
 jobs:
   deploy:
-    name: Deploy TokenScope DEV Infrastructure
+    name: Validate and Deploy DEV Infrastructure
     runs-on: ubuntu-latest
     environment: dev
+    timeout-minutes: 60
+
+    env:
+      RESOURCE_GROUP: rg-westeurope-t1-amd-dev-helios-001
+      EXPECTED_SUBSCRIPTION: a4924ab9-f91e-4235-a611-8b1c3cfb9a7f
+      PARAMS_FILE: infra/parameters/dev.bicepparam
+      PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+      PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+      SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+      INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+      OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+      OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+      OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+      ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_PAT_PARTNER_DEMO: ${{ secrets.GH_PAT_PARTNER_DEMO }}
+      GH_PAT_PRODUCTION: ${{ secrets.GH_PAT_PRODUCTION }}
+      GH_PAT_ENTERPRISE_NFR: ${{ secrets.GH_PAT_ENTERPRISE_NFR }}
+      GH_APP_KEY_PARTNER_DEMO: ${{ secrets.GH_APP_KEY_PARTNER_DEMO }}
 
     steps:
-      # STEP 1: Checkout repository
-      - name: Checkout Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
 
-      # STEP 2: Login to Azure
-      - name: Azure Login
+      - name: Azure login (DEV OIDC)
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # STEP 3: Validate OIDC secret formats
-      - name: Validate OIDC Secret Formats
-        env:
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+      - name: Verify DEV subscription and resource group
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(az account show --query id -o tsv)" = "$EXPECTED_SUBSCRIPTION"
+          test "$RESOURCE_GROUP" = "rg-westeurope-t1-amd-dev-helios-001"
+          az group show --name "$RESOURCE_GROUP" --output none
+
+      - name: Validate OIDC secret formats
         shell: bash
         run: |
           python3 - <<'PY'
-          import os
-          import base64
-          import binascii
-
-          for name in (
-              "OIDC_SESSION_SECRET",
-              "OIDC_AUTH_SESSION_SECRET"
-          ):
-              value = os.environ.get(name, "")
-
-              if len(value) < 48:
-                  raise SystemExit(
-                      f"ERROR: {name} must contain at least 48 characters"
-                  )
-
-              print(f"PASS: {name} format valid")
-
-          key = os.environ.get("OIDC_TOKEN_KEY", "")
-
+          import os, base64, binascii
+          for name in ('OIDC_SESSION_SECRET', 'OIDC_AUTH_SESSION_SECRET'):
+              if len(os.environ.get(name, '')) < 48:
+                  raise SystemExit(f'{name} must have at least 48 characters')
           try:
-              decoded = base64.b64decode(
-                  key,
-                  validate=True
-              )
+              raw = base64.b64decode(os.environ.get('OIDC_TOKEN_KEY', ''), validate=True)
           except (binascii.Error, ValueError):
-              raise SystemExit(
-                  "ERROR: OIDC_TOKEN_KEY must be valid Base64"
-              )
-
-          if len(decoded) != 32:
-              raise SystemExit(
-                  "ERROR: OIDC_TOKEN_KEY must decode to exactly 32 bytes"
-              )
-
-          print("PASS: OIDC_TOKEN_KEY format valid")
-          print("SUCCESS: All OIDC secrets passed validation")
+              raise SystemExit('OIDC_TOKEN_KEY must be valid Base64')
+          if len(raw) != 32:
+              raise SystemExit('OIDC_TOKEN_KEY must decode to exactly 32 bytes')
+          print('OIDC secrets validated (values not displayed).')
           PY
 
-      # STEP 4: Validate Bicep templates
-      - name: Validate Bicep Templates
-        env:
-          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
-          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
-          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+      - name: Validate Bicep and DEV parameter file
         shell: bash
         run: |
-          echo "Validating TokenScope Bicep templates..."
+          set -euo pipefail
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep build-params --file "$PARAMS_FILE" --stdout > /dev/null
 
-          az bicep build \
-            --file infra/main.bicep \
-            --stdout > /dev/null
-
-          az bicep build-params \
-            --file infra/parameters/dev.bicepparam \
-            --stdout > /dev/null
-
-          echo "SUCCESS: Bicep validation completed"
-
-      # STEP 5: Deploy infrastructure to Azure
-      - name: Deploy DEV Infrastructure
-        env:
-          PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
-          PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-          HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
-          INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-          OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-          OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-          OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-          ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+      - name: Check existing DEV PostgreSQL server and backup retention
         shell: bash
         run: |
-          echo "Starting TokenScope DEV infrastructure deployment..."
+          set -euo pipefail
+          az postgres flexible-server list --resource-group "$RESOURCE_GROUP" --output json > "$RUNNER_TEMP/dev-postgres-before.json"
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ['RUNNER_TEMP'] + '/dev-postgres-before.json') as f:
+              servers = json.load(f)
+          if not servers:
+              raise SystemExit('BLOCKED: no existing DEV PostgreSQL server found; review before deployment')
+          for server in servers:
+              name = server.get('name')
+              state = server.get('state')
+              days = (server.get('backup') or {}).get('backupRetentionDays')
+              print(f'PostgreSQL {name}: state={state}, backupRetentionDays={days}')
+              if state not in ('Ready', 'Succeeded'):
+                  raise SystemExit(f'BLOCKED: PostgreSQL server {name} is not ready')
+              if not isinstance(days, int) or days < 7:
+                  raise SystemExit(f'BLOCKED: PostgreSQL {name} backup retention is unverified or under 7 days')
+          print('Backups configured; restore readiness has NOT been verified.')
+          PY
 
-          az deployment group create \
-            --resource-group rg-westeurope-t1-amd-dev-helios-001 \
+      - name: Preview DEV infrastructure changes (What-If)
+        shell: bash
+        run: |
+          set -euo pipefail
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
             --template-file infra/main.bicep \
-            --parameters infra/parameters/dev.bicepparam \
-            --only-show-errors
+            --parameters "$PARAMS_FILE" \
+            --mode Incremental \
+            --output json > "$RUNNER_TEMP/dev-whatif.json"
 
-          echo "SUCCESS: TokenScope DEV infrastructure deployment completed"
+      - name: Block deletions and changes to PostgreSQL resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ['RUNNER_TEMP'] + '/dev-whatif.json') as f:
+              data = json.load(f)
+          changes = data.get('changes')
+          if not isinstance(changes, list):
+              raise SystemExit('BLOCKED: cannot parse Azure What-If changes safely')
+          failures = []
+          for item in changes:
+              kind = item.get('changeType', 'Unknown')
+              rid = item.get('resourceId', '')
+              lower = rid.lower()
+              print(f'{kind}: {rid}')
+              if kind in ('Delete', 'Unknown', 'Unsupported'):
+                  failures.append(f'{kind}: {rid}')
+              if 'microsoft.dbforpostgresql/' in lower and kind not in ('NoChange', 'Ignore'):
+                  failures.append(f'PostgreSQL {kind}: {rid}')
+          if failures:
+              print('BLOCKED: review these changes manually before applying:')
+              for item in failures:
+                  print(item)
+              raise SystemExit(1)
+          print('No proposed deletions or PostgreSQL resource changes detected by What-If.')
+          PY
 
-      # STEP 6: Logout from Azure
-      - name: Azure Logout
+      - name: Apply DEV infrastructure (incremental)
+        shell: bash
+        run: |
+          set -euo pipefail
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters "$PARAMS_FILE" \
+            --mode Incremental \
+            --only-show-errors \
+            --output none
+
+      - name: Verify DEV PostgreSQL server identities remain unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          az postgres flexible-server list --resource-group "$RESOURCE_GROUP" --output json > "$RUNNER_TEMP/dev-postgres-after.json"
+          python3 - <<'PY'
+          import json, os
+          root = os.environ['RUNNER_TEMP']
+          with open(root + '/dev-postgres-before.json') as f:
+              before = json.load(f)
+          with open(root + '/dev-postgres-after.json') as f:
+              after = json.load(f)
+          ids = lambda items: {x['id'].lower() for x in items}
+          if ids(before) != ids(after):
+              raise SystemExit('ALERT: DEV PostgreSQL server IDs changed; investigate immediately')
+          print('DEV PostgreSQL server IDs preserved. Row-level preservation not yet verified.')
+          PY
+
+      - name: Azure logout
         if: always()
         shell: bash
-        run: |
-          az logout || true
+        run: az logout || true

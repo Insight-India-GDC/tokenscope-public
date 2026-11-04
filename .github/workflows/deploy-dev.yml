@@ -114,7 +114,15 @@ jobs:
             --template-file infra/main.bicep \
             --parameters "$PARAMS_FILE" \
             --mode Incremental \
+            --result-format ResourceIdOnly \
+            --no-pretty-print \
             --output json > "$RUNNER_TEMP/dev-whatif.json"
+          # Fail closed if Azure CLI produced no JSON output.
+          if [ ! -s "$RUNNER_TEMP/dev-whatif.json" ]; then
+            echo "ERROR: Azure What-If returned empty output; infrastructure was not deployed."
+            exit 1
+          fi
+          python3 -m json.tool "$RUNNER_TEMP/dev-whatif.json" > /dev/null
 
       - name: Block deletions and changes to PostgreSQL resources
         shell: bash
@@ -122,8 +130,14 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json, os
-          with open(os.environ['RUNNER_TEMP'] + '/dev-whatif.json') as f:
-              data = json.load(f)
+          path = os.path.join(os.environ['RUNNER_TEMP'], 'dev-whatif.json')
+          try:
+              with open(path) as f:
+                  data = json.load(f)
+          except (OSError, json.JSONDecodeError) as exc:
+              raise SystemExit(f'BLOCKED: Azure What-If did not return valid JSON: {exc}')
+          if not isinstance(data, dict):
+              raise SystemExit('BLOCKED: Azure What-If result is not a JSON object')
           changes = data.get('changes')
           if not isinstance(changes, list):
               raise SystemExit('BLOCKED: cannot parse Azure What-If changes safely')

@@ -38,22 +38,17 @@ jobs:
           import os
           import base64
           import binascii
-
           for name in (
               "OIDC_SESSION_SECRET",
               "OIDC_AUTH_SESSION_SECRET"
           ):
               value = os.environ.get(name, "")
-
               if len(value) < 48:
                   raise SystemExit(
                       f"ERROR: {name} must contain at least 48 characters"
                   )
-
               print(f"PASS: {name} format valid")
-
           key = os.environ.get("OIDC_TOKEN_KEY", "")
-
           try:
               decoded = base64.b64decode(
                   key,
@@ -63,16 +58,13 @@ jobs:
               raise SystemExit(
                   "ERROR: OIDC_TOKEN_KEY must be valid Base64"
               )
-
           if len(decoded) != 32:
               raise SystemExit(
                   "ERROR: OIDC_TOKEN_KEY must decode to exactly 32 bytes"
               )
-
           print("PASS: OIDC_TOKEN_KEY format valid")
           print("SUCCESS: All OIDC secrets passed validation")
           PY
-
       # STEP 4: Validate Bicep templates
       - name: Validate Bicep Templates
         env:
@@ -88,17 +80,13 @@ jobs:
         shell: bash
         run: |
           echo "Validating TokenScope Bicep templates..."
-
           az bicep build \
             --file infra/main.bicep \
             --stdout > /dev/null
-
           az bicep build-params \
             --file infra/parameters/dev.bicepparam \
             --stdout > /dev/null
-
           echo "SUCCESS: Bicep validation completed"
-
       # STEP 5: Deploy infrastructure to Azure
       - name: Deploy DEV Infrastructure
         env:
@@ -114,261 +102,15 @@ jobs:
         shell: bash
         run: |
           echo "Starting TokenScope DEV infrastructure deployment..."
-
           az deployment group create \
             --resource-group rg-westeurope-t1-amd-dev-helios-001 \
             --template-file infra/main.bicep \
             --parameters infra/parameters/dev.bicepparam \
             --only-show-errors
-
           echo "SUCCESS: TokenScope DEV infrastructure deployment completed"
-
       # STEP 6: Logout from Azure
       - name: Azure Logout
         if: always()
         shell: bash
         run: |
-          az logout || true ............................ name: Build and Deploy TokenScope DEV Image
-
-on:
-  workflow_dispatch:
-
-permissions:
-  id-token: write
-  contents: read
-
-jobs:
-  build-push-deploy:
-    name: Build, Push and Deploy DEV
-
-    # Azure VM self-hosted runner inside TokenScope DEV VNet
-    runs-on:
-      - self-hosted
-      - Linux
-      - X64
-      - tokenscope-dev
-
-    environment: dev
-    timeout-minutes: 45
-
-    env:
-      AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-dev-helios-001
-      EXPECTED_SUBSCRIPTION: a4924ab9-f91e-4235-a611-8b1c3cfb9a7f
-      ACR_NAME: crtokenscopeigdcdevweu
-      IMAGE_NAME: tokenscope
-      CONTAINER_APP_NAME: ca-tokenscopeigdc-dev-weu
-
-    steps:
-
-      # STEP 1: Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      # STEP 2: Login to Azure using GitHub OIDC
-      - name: Azure Login using OIDC
-        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      # STEP 3: Verify this job is on the private runner
-      - name: Verify private DEV runner
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Runner Name: $RUNNER_NAME"
-          echo "Runner OS:   $RUNNER_OS"
-          echo "Hostname:    $(hostname)"
-
-          test "$(hostname)" = "vm-tokenscope-dev-github-runner" || {
-            echo "ERROR: Workflow is not running on expected DEV runner."
-            exit 1
-          }
-
-          echo "Checking private ACR DNS..."
-
-          getent hosts "${ACR_NAME}.azurecr.io"
-
-          echo "SUCCESS: Private DEV runner confirmed."
-
-      # STEP 4: Verify Azure target
-      - name: Verify DEV target and resources
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ACTUAL_SUB=$(az account show --query id -o tsv)
-
-          if [ "$ACTUAL_SUB" != "$EXPECTED_SUBSCRIPTION" ]; then
-            echo "ERROR: Wrong Azure subscription."
-            echo "Expected: $EXPECTED_SUBSCRIPTION"
-            echo "Actual:   $ACTUAL_SUB"
-            exit 1
-          fi
-
-          test "$AZURE_RESOURCE_GROUP" = "rg-westeurope-t1-amd-dev-helios-001"
-          test "$ACR_NAME" = "crtokenscopeigdcdevweu"
-          test "$CONTAINER_APP_NAME" = "ca-tokenscopeigdc-dev-weu"
-
-          az group show \
-            --name "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          az acr show \
-            --name "$ACR_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          az containerapp show \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          echo "SUCCESS: DEV Azure resources validated."
-
-      # STEP 5: Verify Docker
-      - name: Verify Docker
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          docker --version
-          docker info > /dev/null
-
-          echo "SUCCESS: Docker is running."
-
-      # STEP 6: Login to PRIVATE DEV ACR
-      - name: Login to private DEV ACR
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "ACR private DNS:"
-          getent hosts "${ACR_NAME}.azurecr.io"
-
-          az acr login \
-            --name "$ACR_NAME"
-
-          echo "SUCCESS: Logged into private DEV ACR."
-
-      # STEP 7: Build Docker image
-      - name: Build Docker image
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
-
-          docker build \
-            -t "${IMAGE}:${GITHUB_SHA}" \
-            -t "${IMAGE}:latest" \
-            .
-
-          echo "SUCCESS: Docker image built."
-
-      # STEP 8: Push immutable image
-      - name: Push commit image
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
-
-          docker push "${IMAGE}:${GITHUB_SHA}"
-
-          echo "SUCCESS: Commit-tagged image pushed."
-
-      # STEP 9: Push latest image
-      - name: Push latest image
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
-
-          docker push "${IMAGE}:latest"
-
-          echo "SUCCESS: Latest image pushed."
-
-      # STEP 10: Verify ACR images
-      - name: Verify pushed images
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          az acr repository show-tags \
-            --name "$ACR_NAME" \
-            --repository "$IMAGE_NAME" \
-            --output table
-
-          az acr repository show \
-            --name "$ACR_NAME" \
-            --image "${IMAGE_NAME}:${GITHUB_SHA}" \
-            --output none
-
-          az acr repository show \
-            --name "$ACR_NAME" \
-            --image "${IMAGE_NAME}:latest" \
-            --output none
-
-          echo "SUCCESS: Images verified in private DEV ACR."
-
-      # STEP 11: Update DEV Container App
-      - name: Update DEV Container App
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}"
-
-          az containerapp update \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "$IMAGE" \
-            --output none
-
-          echo "SUCCESS: DEV Container App updated."
-
-      # STEP 12: Verify deployed image
-      - name: Verify deployed DEV image
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          EXPECTED_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}"
-
-          DEPLOYED_IMAGE=$(az containerapp show \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query "properties.template.containers[0].image" \
-            --output tsv)
-
-          echo "Expected: $EXPECTED_IMAGE"
-          echo "Deployed: $DEPLOYED_IMAGE"
-
-          if [ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]; then
-            echo "ERROR: Wrong image deployed."
-            exit 1
-          fi
-
-          echo "SUCCESS: Correct immutable image deployed."
-
-      # STEP 13: Verify Container App revisions
-      - name: Verify DEV Container App revisions
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          az containerapp revision list \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output table
-
-      # STEP 14: Logout
-      - name: Azure Logout
-        if: always()
-        shell: bash
-        run: |
-          az logout || true this is dev env ---- but all the data should be there it should not be deleted or created new
+          az logout || true

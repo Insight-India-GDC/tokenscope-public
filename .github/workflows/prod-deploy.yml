@@ -32,7 +32,7 @@ jobs:
   infrastructure:
     name: PROD infrastructure - ${{ inputs.mode }}
     runs-on: ubuntu-latest
-    environment: prod
+    environment: production
     timeout-minutes: 90
     env:
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
@@ -52,12 +52,9 @@ jobs:
       OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
       OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
       ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      #ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       IMAGE_TAG: ${{ vars.IMAGE_TAG }}
       FRONT_DOOR_ID: ${{ vars.FRONT_DOOR_ID }}
-      APP_PUBLIC_ORIGIN: ${{ vars.APP_PUBLIC_ORIGIN }}
-      ENTRA_REDIRECT_URI: ${{ vars.ENTRA_REDIRECT_URI }}
-      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
 
     steps:
       - name: Checkout repository

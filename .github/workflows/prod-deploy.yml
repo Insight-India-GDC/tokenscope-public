@@ -4,20 +4,10 @@ name: Deploy TokenScope PROD Infrastructure
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: 'Review What-If or apply approved infrastructure'
-        type: choice
-        options:
-          - what-if
-          - apply
-        default: what-if
-        required: true
-
       confirm_production:
-        description: 'For apply, enter DEPLOY-PROD'
+        description: 'Type DEPLOY-PROD to deploy infrastructure'
         type: string
-        default: ''
-        required: false
+        required: true
 
 permissions:
   contents: read
@@ -29,10 +19,12 @@ concurrency:
 
 jobs:
   deploy:
-    name: PROD Infrastructure - ${{ inputs.mode }}
+    name: Deploy PROD Azure Infrastructure
 
     runs-on: ubuntu-latest
+
     environment: prod
+
     timeout-minutes: 120
 
     env:
@@ -41,55 +33,57 @@ jobs:
       # ============================================================
 
       AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-prd-helios-002
+
       EXPECTED_SUBSCRIPTION: 3796cf20-cb96-4457-914f-397760fe5834
+
       AZURE_LOCATION: westeurope
 
       PARAM_FILE: infra/parameters/prod.bicepparam
 
-      MODE: ${{ inputs.mode }}
       CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
 
       # ============================================================
-      # FRONT DOOR CONFIGURATION - CHANGE DIRECTLY HERE
+      # AZURE FRONT DOOR - CONTROL DIRECTLY IN CODE
       # ============================================================
       #
       # off:
-      #   First private infrastructure deployment.
-      #   Front Door remains disabled.
+      #   Front Door disabled.
       #
       # create:
-      #   Enable Azure Front Door Premium.
-      #   Approve its Private Link request.
+      #   Create Front Door Premium.
       #
       # finalize:
-      #   Configure actual Front Door hostname,
-      #   Front Door instance ID, Entra callback,
-      #   and scheduled worker base URL.
+      #   Configure Front Door instance ID,
+      #   public URL, Entra callback and workers.
       #
-      # Do not return to off after finalization without
-      # reviewing the infrastructure impact.
+      # Change this value when required.
 
       FRONT_DOOR_PHASE: 'off'
 
-      # Leave empty during off and create.
-      # Populate using deployment outputs for finalize.
+      # Fill these only during finalize.
 
       FRONT_DOOR_HOSTNAME: ''
+
       FRONT_DOOR_INSTANCE_ID: ''
 
       # ============================================================
-      # EXISTING PROD SECRETS
+      # PROD APPLICATION SECRETS
       # ============================================================
 
       PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+
       PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
 
       SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+
       HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+
       INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
 
       OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+
       OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+
       OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
 
       ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
@@ -106,10 +100,10 @@ jobs:
           persist-credentials: false
 
       # ============================================================
-      # STEP 2: LOGIN TO AZURE USING PROD OIDC
+      # STEP 2: AZURE LOGIN USING PROD OIDC
       # ============================================================
 
-      - name: Login to PROD Azure using OIDC
+      - name: Azure Login using PROD OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -117,10 +111,10 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       # ============================================================
-      # STEP 3: VALIDATE PROD TARGET AND SECRETS
+      # STEP 3: VALIDATE PROD TARGET
       # ============================================================
 
-      - name: Validate PROD target and required secrets
+      - name: Validate PROD Target and Confirmation
         shell: bash
         env:
           CONFIGURED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
@@ -129,30 +123,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Validating PROD environment..."
+          echo "Validating TokenScope PROD configuration..."
 
           test -f infra/main.bicep || {
-            echo "::error::infra/main.bicep missing"
+            echo "::error::infra/main.bicep not found"
             exit 1
           }
 
           test -f "$PARAM_FILE" || {
-            echo "::error::PROD parameter file missing"
+            echo "::error::PROD parameter file not found"
+            exit 1
+          }
+
+          test "$CONFIRM_PRODUCTION" = "DEPLOY-PROD" || {
+            echo "::error::Type DEPLOY-PROD to continue"
             exit 1
           }
 
           test "$CONFIGURED_RESOURCE_GROUP" = "$AZURE_RESOURCE_GROUP" || {
-            echo "::error::PROD resource group mismatch"
+            echo "::error::Resource group mismatch"
             exit 1
           }
 
           test "$CONFIGURED_SUBSCRIPTION" = "$EXPECTED_SUBSCRIPTION" || {
-            echo "::error::PROD subscription mismatch"
+            echo "::error::Subscription mismatch"
             exit 1
           }
 
           test "$CONFIGURED_LOCATION" = "$AZURE_LOCATION" || {
-            echo "::error::PROD location mismatch"
+            echo "::error::Location mismatch"
             exit 1
           }
 
@@ -162,6 +161,21 @@ jobs:
             echo "::error::Wrong Azure subscription: $ACTUAL_SUB"
             exit 1
           }
+
+          az group show \
+            --name "$AZURE_RESOURCE_GROUP" \
+            --output none
+
+          echo "SUCCESS: PROD subscription and resource group verified"
+
+      # ============================================================
+      # STEP 4: VALIDATE REQUIRED SECRETS
+      # ============================================================
+
+      - name: Validate PROD Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
 
           for name in \
             PG_ADMIN_LOGIN \
@@ -191,36 +205,21 @@ jobs:
                   validate=True
               )
           except (ValueError, binascii.Error):
-              raise SystemExit(
-                  "ERROR: Invalid OIDC_TOKEN_KEY Base64"
-              )
+              raise SystemExit("Invalid OIDC_TOKEN_KEY Base64")
 
           if len(data) != 32:
               raise SystemExit(
-                  "ERROR: OIDC_TOKEN_KEY must decode to 32 bytes"
+                  "OIDC_TOKEN_KEY must decode to 32 bytes"
               )
 
-          print("SUCCESS: Required PROD secrets validated")
+          print("SUCCESS: PROD secrets validated")
           PY
 
-          if [ "$MODE" = "apply" ]; then
-            test "$CONFIRM_PRODUCTION" = "DEPLOY-PROD" || {
-              echo "::error::Apply requires DEPLOY-PROD"
-              exit 1
-            }
-          fi
-
-          az group show \
-            --name "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          echo "SUCCESS: PROD target validated"
-
       # ============================================================
-      # STEP 4: PREPARE FRONT DOOR PARAMETERS
+      # STEP 5: PREPARE FRONT DOOR PARAMETERS
       # ============================================================
 
-      - name: Prepare Azure Front Door parameters
+      - name: Prepare Azure Front Door Parameters
         shell: bash
         run: |
           set -euo pipefail
@@ -248,17 +247,18 @@ jobs:
               ;;
 
             finalize)
-              if ! [[ "$FRONT_DOOR_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]]; then
+              [[ "$FRONT_DOOR_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]] || {
                 echo "::error::Invalid Front Door hostname"
                 exit 1
-              fi
+              }
 
-              if ! [[ "$FRONT_DOOR_INSTANCE_ID" =~ ^[a-fA-F0-9-]{36}$ ]]; then
+              [[ "$FRONT_DOOR_INSTANCE_ID" =~ ^[a-fA-F0-9-]{36}$ ]] || {
                 echo "::error::Invalid Front Door instance ID"
                 exit 1
-              fi
+              }
 
               echo "ENABLE_FRONT_DOOR=true" >> "$GITHUB_ENV"
+
               echo "FRONT_DOOR_ID=$FRONT_DOOR_INSTANCE_ID" >> "$GITHUB_ENV"
 
               echo "APP_PUBLIC_ORIGIN=https://$FRONT_DOOR_HOSTNAME" >> "$GITHUB_ENV"
@@ -271,22 +271,22 @@ jobs:
               ;;
 
             *)
-              echo "::error::Invalid Front Door phase: $FRONT_DOOR_PHASE"
+              echo "::error::Invalid Front Door phase"
               exit 1
               ;;
 
           esac
 
       # ============================================================
-      # STEP 5: VALIDATE BICEP FILES
+      # STEP 6: VALIDATE BICEP FILES
       # ============================================================
 
-      - name: Validate PROD Bicep templates
+      - name: Validate PROD Bicep
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Compiling PROD Bicep..."
+          echo "Compiling PROD Bicep templates..."
 
           az bicep build \
             --file infra/main.bicep \
@@ -299,10 +299,10 @@ jobs:
           echo "SUCCESS: PROD Bicep compilation completed"
 
       # ============================================================
-      # STEP 6: VALIDATE ARM DEPLOYMENT
+      # STEP 7: VALIDATE ARM DEPLOYMENT
       # ============================================================
 
-      - name: Validate PROD ARM deployment
+      - name: Validate PROD ARM Deployment
         shell: bash
         run: |
           set -euo pipefail
@@ -321,106 +321,22 @@ jobs:
           echo "SUCCESS: PROD ARM validation completed"
 
       # ============================================================
-      # STEP 7: WHAT-IF PREVIEW WITH JSON OUTPUT FIX
+      # STEP 8: DEPLOY PROD INFRASTRUCTURE DIRECTLY
       #
-      # FIX:
-      # --no-pretty-print enables JSON output.
+      # NO WHAT-IF STEP.
       #
-      # An empty or invalid response blocks deployment.
-      # Delete and Unsupported changes also block it.
+      # Requires explicit production confirmation and
+      # GitHub Environment approval where configured.
       # ============================================================
 
-      - name: Review PROD infrastructure What-If
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Running PROD infrastructure What-If..."
-
-          az deployment group what-if \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" \
-              enableFrontDoor="$ENABLE_FRONT_DOOR" \
-              frontDoorId="$FRONT_DOOR_ID" \
-              appPublicOrigin="$APP_PUBLIC_ORIGIN" \
-              entraIdRedirectUri="$ENTRA_REDIRECT_URI" \
-              workerBaseUrl="$WORKER_BASE_URL" \
-            --result-format FullResourcePayloads \
-            --no-pretty-print \
-            --output json > what-if.json
-
-          if [ ! -s what-if.json ]; then
-            echo "::error::Azure What-If returned empty output"
-            exit 1
-          fi
-
-          python3 - <<'PY'
-          import json
-          import sys
-
-          try:
-              with open("what-if.json", encoding="utf-8") as f:
-                  result = json.load(f)
-          except (OSError, json.JSONDecodeError) as exc:
-              print(f"ERROR: Invalid What-If JSON: {exc}")
-              sys.exit(1)
-
-          if not isinstance(result, dict):
-              sys.exit("ERROR: Unexpected What-If format")
-
-          changes = result.get("changes")
-
-          if not isinstance(changes, list):
-              sys.exit("ERROR: What-If changes list missing")
-
-          print("\nPROD infrastructure changes:")
-          print("=" * 60)
-
-          blocked = []
-
-          for item in changes:
-              if not isinstance(item, dict):
-                  sys.exit("ERROR: Invalid change entry")
-
-              change_type = item.get("changeType", "Unknown")
-              resource_id = item.get("resourceId", "Unknown")
-
-              print(f"{change_type}: {resource_id}")
-
-              if change_type in ("Delete", "Unsupported"):
-                  blocked.append((change_type, resource_id))
-
-          print("=" * 60)
-          print(f"Total changes: {len(changes)}")
-
-          if blocked:
-              print("\nBLOCKED: Unsafe or unsupported changes")
-
-              for change_type, resource_id in blocked:
-                  print(f"{change_type}: {resource_id}")
-
-              sys.exit(1)
-
-          print("\nWhat-If JSON processed successfully.")
-          print("No Delete/Unsupported changes detected.")
-          print("Create/Modify/Deploy changes still require approval.")
-          PY
-
-          echo "SUCCESS: What-If processing completed"
-
-      # ============================================================
-      # STEP 8: APPLY APPROVED PROD INFRASTRUCTURE
-      # ============================================================
-
-      - name: Apply approved PROD infrastructure
-        if: ${{ inputs.mode == 'apply' }}
+      - name: Deploy PROD Infrastructure
         shell: bash
         run: |
           set -euo pipefail
 
           DEPLOYMENT_NAME="tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
-          echo "Applying approved PROD infrastructure..."
+          echo "Deploying TokenScope PROD infrastructure..."
 
           az deployment group create \
             --name "$DEPLOYMENT_NAME" \
@@ -443,8 +359,7 @@ jobs:
       # STEP 9: SHOW DEPLOYMENT OUTPUTS
       # ============================================================
 
-      - name: Show PROD deployment outputs
-        if: ${{ inputs.mode == 'apply' }}
+      - name: Show PROD Deployment Outputs
         shell: bash
         run: |
           set -euo pipefail
@@ -467,6 +382,9 @@ jobs:
           for key in (
               "acrLoginServer",
               "containerAppName",
+              "containerAppUrl",
+              "keyVaultName",
+              "postgresqlServerName",
               "frontDoorEndpointFqdn",
               "frontDoorInstanceId",
               "frontDoorPrivateLinkRequestMessage"
@@ -478,7 +396,7 @@ jobs:
           PY
 
       # ============================================================
-      # STEP 10: DEPLOYMENT SUMMARY
+      # STEP 10: SUMMARY
       # ============================================================
 
       - name: PROD Deployment Summary
@@ -488,19 +406,17 @@ jobs:
           {
             echo "## TokenScope PROD Infrastructure"
             echo ""
-            echo "- Mode: $MODE"
             echo "- Resource group: $AZURE_RESOURCE_GROUP"
             echo "- Subscription: $EXPECTED_SUBSCRIPTION"
-            echo "- Location: $AZURE_LOCATION"
+            echo "- Region: $AZURE_LOCATION"
             echo "- Front Door phase: $FRONT_DOOR_PHASE"
             echo ""
-            echo "What-If requires human review."
-            echo "Front Door Private Link approval may be required."
-            echo "Check Container App health and PostgreSQL readiness."
+            echo "Infrastructure deploy completed only if the apply step succeeded."
+            echo "Verify Container App health before image release."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ============================================================
-      # STEP 11: AZURE LOGOUT
+      # STEP 11: LOGOUT
       # ============================================================
 
       - name: Azure Logout

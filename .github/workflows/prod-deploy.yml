@@ -20,7 +20,11 @@ jobs:
   deploy:
     name: Deploy PROD Azure Infrastructure
 
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - tokenscope-prod
 
     environment: prod
 

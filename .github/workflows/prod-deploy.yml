@@ -469,13 +469,14 @@ jobs:
 
           echo "PROD_INFRA=$PROD_INFRA" >> "$GITHUB_ENV"
 
+      
       # ============================================================
-      # STEP 7: PREPARE TEMPORARY PROD PARAMETER FILE
+      # STEP 7: PREPARE TEMPORARY PROD PARAMETERS
       #
-      # Front Door phase is applied to the temporary
-      # parameter file.
+      # Fix: enableFrontDoor may be missing or formatted
+      # differently in the existing PROD parameter file.
       #
-      # Existing prod.bicepparam remains unchanged.
+      # Original repository files remain unchanged.
       # ============================================================
 
       - name: Prepare Temporary PROD Parameters
@@ -483,50 +484,79 @@ jobs:
         run: |
           set -euo pipefail
 
-          export PROD_INFRA
-
           python3 - <<'PY'
           import os
           import re
           from pathlib import Path
 
-          param_file = (
-              Path(os.environ["PROD_INFRA"])
-              / "parameters"
-              / "prod.bicepparam"
-          )
+          root = Path(os.environ["PROD_INFRA"])
+          param_file = root / "parameters" / "prod.bicepparam"
+          main_file = root / "main.bicep"
+
+          if not param_file.is_file():
+              raise SystemExit("PROD parameter file not found.")
+
+          if not main_file.is_file():
+              raise SystemExit("PROD main.bicep not found.")
 
           content = param_file.read_text(encoding="utf-8")
+          main_content = main_file.read_text(encoding="utf-8")
 
           enabled = os.environ["ENABLE_FRONT_DOOR"]
 
-          pattern = (
-              r"(?m)^param enableFrontDoor\s*=\s*"
-              r"(?:true|false)\s*$"
-          )
+          if enabled not in ("true", "false"):
+              raise SystemExit("Invalid ENABLE_FRONT_DOOR value.")
 
-          content, count = re.subn(
-              pattern,
-              f"param enableFrontDoor = {enabled}",
-              content
-          )
-
-          if count != 1:
+          # Confirm this is a supported root Bicep parameter.
+          if not re.search(
+              r"\bparam\s+enableFrontDoor\s+bool\b",
+              main_content
+          ):
               raise SystemExit(
-                  "ERROR: enableFrontDoor parameter not found."
+                  "main.bicep does not declare "
+                  "param enableFrontDoor bool."
               )
+
+          # Match existing declaration, including whitespace,
+          # comments, and different values.
+          pattern = (
+              r"(?m)^[ \t]*param[ \t]+enableFrontDoor"
+              r"[ \t]*=[ \t]*[^\r\n]*"
+          )
+
+          matches = list(re.finditer(pattern, content))
+
+          if len(matches) > 1:
+              raise SystemExit(
+                  "Duplicate enableFrontDoor parameters found."
+              )
+
+          new_line = f"param enableFrontDoor = {enabled}"
+
+          if len(matches) == 1:
+              content = re.sub(
+                  pattern,
+                  new_line,
+                  content,
+                  count=1
+              )
+              print("Existing enableFrontDoor updated.")
+          else:
+              content = content.rstrip() + "\n\n" + new_line + "\n"
+              print("Missing enableFrontDoor parameter added.")
 
           param_file.write_text(
               content,
               encoding="utf-8"
           )
 
-          print("Temporary PROD parameters prepared.")
           print(f"enableFrontDoor = {enabled}")
+          print("Original repository files unchanged.")
           PY
 
           echo "PROD_PARAM_FILE=$PROD_INFRA/parameters/prod.bicepparam" \
             >> "$GITHUB_ENV"
+
 
       # ============================================================
       # STEP 8: VALIDATE BICEP FILES

@@ -10,7 +10,7 @@ param projectName = 'tokenscopeigdcprod'
 
 // Set the GitHub prod Environment variable IMAGE_TAG to the immutable tag
 // produced by prod-image-deploy.yml.
-param imageTag = readEnvironmentVariable('IMAGE_TAG')
+param imageTag = 'latest'
 
 // The PROD deployment identity needs Contributor plus User Access Administrator
 // (or another approved equivalent) at the PROD resource-group scope.
@@ -26,21 +26,23 @@ param oidcSessionSecret = readEnvironmentVariable('OIDC_SESSION_SECRET')
 param oidcAuthSessionSecret = readEnvironmentVariable('OIDC_AUTH_SESSION_SECRET')
 param oidcTokenKey = readEnvironmentVariable('OIDC_TOKEN_KEY')
 param entraIdClientSecret = readEnvironmentVariable('ENTRA_CLIENT_SECRET')
-
+param appPublicOrigin = ''
 // Microsoft Entra application used for TokenScope user sign-in.
 // This is separate from AZURE_CLIENT_ID, which belongs to GitHub OIDC deployment.
-param entraIdClientId = readEnvironmentVariable('ENTRA_CLIENT_ID')
-param entraIdTenantId = readEnvironmentVariable('ENTRA_TENANT_ID')
-param bootstrapAdminEmail = readEnvironmentVariable('BOOTSTRAP_ADMIN_EMAIL')
-
+param entraIdClientId = '1d51bb60-1d9b-4d5b-8bbb-6096d583d4af'
+param entraIdTenantId = '6c637512-c417-4e78-9d62-b61258e4b619'
+param bootstrapAdminEmail = 'manideep.muddagowni@insight.com'
+param allowPersonaOverride = false
+param workerBaseUrl = ''
+param entraIdRedirectUri =''
 // Production private networking. Use only IPAM-approved, non-overlapping ranges.
 param enablePrivateNetworking = true
 param vnetName = 'vnet-tokenscopeigdc-prod-weu'
-param vnetAddressSpace = readEnvironmentVariable('VNET_ADDRESS_SPACE')
-param containerAppsSubnetPrefix = readEnvironmentVariable('ACA_SUBNET_PREFIX')
-param privateEndpointsSubnetPrefix = readEnvironmentVariable('PE_SUBNET_PREFIX')
-param amplsSubnetPrefix = readEnvironmentVariable('AMPLS_SUBNET_PREFIX')
-param buildSubnetPrefix = readEnvironmentVariable('RUNNER_SUBNET_PREFIX')
+param vnetAddressSpace = '10.0.2.0/24'
+param containerAppsSubnetPrefix = '10.0.2.0/27'
+param privateEndpointsSubnetPrefix = '10.0.2.32/28'
+param amplsSubnetPrefix = '10.0.2.48/28'
+param buildSubnetPrefix = '10.0.2.64/27'
 param registerDnsZoneGroups = true
 
 // Keep Azure Monitor query access unchanged until AMPLS and private DNS are proven.

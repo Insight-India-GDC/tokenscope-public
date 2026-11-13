@@ -1,0 +1,284 @@
+name: Deploy TokenScope PROD Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "what-if previews changes; apply deploys them"
+        type: choice
+        options:
+          - what-if
+          - apply
+        default: what-if
+        required: true
+      enable_front_door:
+        description: "Enable Front Door only after the private Container App is healthy"
+        type: boolean
+        default: false
+        required: true
+      confirm_production:
+        description: "For apply only, type DEPLOY-PROD"
+        type: string
+        default: ""
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: tokenscope-prod-infrastructure
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: PROD infrastructure (${{ inputs.mode }})
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 90
+
+    env:
+      # GitHub PROD Environment variables
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      EXPECTED_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      IMAGE_TAG: ${{ vars.IMAGE_TAG }}
+      ENTRA_CLIENT_ID: ${{ vars.ENTRA_CLIENT_ID }}
+      ENTRA_TENANT_ID: ${{ vars.ENTRA_TENANT_ID }}
+      BOOTSTRAP_ADMIN_EMAIL: ${{ vars.BOOTSTRAP_ADMIN_EMAIL }}
+      VNET_ADDRESS_SPACE: ${{ vars.VNET_ADDRESS_SPACE }}
+      ACA_SUBNET_PREFIX: ${{ vars.ACA_SUBNET_PREFIX }}
+      PE_SUBNET_PREFIX: ${{ vars.PE_SUBNET_PREFIX }}
+      AMPLS_SUBNET_PREFIX: ${{ vars.AMPLS_SUBNET_PREFIX }}
+      RUNNER_SUBNET_PREFIX: ${{ vars.RUNNER_SUBNET_PREFIX }}
+      FRONT_DOOR_ID: ${{ vars.FRONT_DOOR_ID }}
+      APP_PUBLIC_ORIGIN: ${{ vars.APP_PUBLIC_ORIGIN }}
+      ENTRA_REDIRECT_URI: ${{ vars.ENTRA_REDIRECT_URI }}
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+
+      # GitHub PROD Environment secrets
+      PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+      PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+      SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+      INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+      OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+      OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+      OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+      ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+
+      PARAM_FILE: infra/parameters/prod.bicepparam
+      ENABLE_FRONT_DOOR: ${{ inputs.enable_front_door }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login with OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate production configuration
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+        run: |
+          set -euo pipefail
+
+          [ -f infra/main.bicep ] || { echo "::error::infra/main.bicep was not found"; exit 1; }
+          [ -f "$PARAM_FILE" ] || { echo "::error::$PARAM_FILE was not found"; exit 1; }
+
+          required=(
+            AZURE_RESOURCE_GROUP EXPECTED_SUBSCRIPTION_ID IMAGE_TAG
+            ENTRA_CLIENT_ID ENTRA_TENANT_ID BOOTSTRAP_ADMIN_EMAIL
+            VNET_ADDRESS_SPACE ACA_SUBNET_PREFIX PE_SUBNET_PREFIX
+            AMPLS_SUBNET_PREFIX RUNNER_SUBNET_PREFIX
+            PG_ADMIN_LOGIN PG_ADMIN_PASSWORD SESSION_SECRET HMAC_SESSION_KEY
+            INTERNAL_WORKER_HMAC_KEY OIDC_SESSION_SECRET
+            OIDC_AUTH_SESSION_SECRET OIDC_TOKEN_KEY ENTRA_CLIENT_SECRET
+          )
+
+          # FRONT_DOOR_ID and public URL values may be empty during the first
+          # Front Door creation pass. Populate them from deployment outputs and
+          # run this workflow again to finalize authentication/runtime URLs.
+
+          missing=""
+          for name in "${required[@]}"; do
+            [ -n "$(printenv "$name")" ] || missing="$missing $name"
+          done
+          [ -z "$missing" ] || {
+            echo "::error::Missing PROD Environment variables/secrets:$missing"
+            exit 1
+          }
+
+          [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            echo "::error::IMAGE_TAG contains unsupported characters"
+            exit 1
+          }
+
+          if [ "$MODE" = "apply" ] && [ "$CONFIRM_PRODUCTION" != "DEPLOY-PROD" ]; then
+            echo "::error::Apply requires confirm_production=DEPLOY-PROD"
+            exit 1
+          fi
+
+          actual_subscription="$(az account show --query id -o tsv)"
+          [ "$actual_subscription" = "$EXPECTED_SUBSCRIPTION_ID" ] || {
+            echo "::error::Logged into $actual_subscription; expected $EXPECTED_SUBSCRIPTION_ID"
+            exit 1
+          }
+
+          az group show --name "$AZURE_RESOURCE_GROUP" --output none
+
+          # OIDC_TOKEN_KEY must decode to exactly 32 bytes.
+          decoded_bytes="$(printf '%s' "$OIDC_TOKEN_KEY" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')"
+          [ "$decoded_bytes" = "32" ] || {
+            echo "::error::OIDC_TOKEN_KEY must be valid Base64 that decodes to exactly 32 bytes"
+            exit 1
+          }
+
+      - name: Verify required resource providers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          providers=(
+            Microsoft.App
+            Microsoft.OperationalInsights
+            Microsoft.Insights
+            Microsoft.KeyVault
+            Microsoft.ContainerRegistry
+            Microsoft.DBforPostgreSQL
+            Microsoft.Cache
+            Microsoft.ManagedIdentity
+            Microsoft.Network
+          )
+
+          if [ "$ENABLE_FRONT_DOOR" = "true" ]; then
+            providers+=(Microsoft.Cdn)
+          fi
+
+          failed=0
+          for namespace in "${providers[@]}"; do
+            state="$(az provider show --namespace "$namespace" --query registrationState -o tsv)"
+            printf '%-38s %s\n' "$namespace" "$state"
+            if [ "$state" != "Registered" ]; then
+              echo "::error::$namespace is not registered"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ]
+
+      - name: Compile Bicep
+        shell: bash
+        run: |
+          set -euo pipefail
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep build-params --file "$PARAM_FILE" --stdout > /dev/null
+
+      - name: Validate ARM deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          az deployment group validate \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters "$PARAM_FILE" enableFrontDoor="$ENABLE_FRONT_DOOR" \
+            --only-show-errors \
+            --output none
+
+      - name: Review what-if
+        shell: bash
+        run: |
+          set -euo pipefail
+          az deployment group what-if \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters "$PARAM_FILE" enableFrontDoor="$ENABLE_FRONT_DOOR" \
+            --result-format FullResourcePayloads
+
+      - name: Apply production infrastructure
+        id: apply
+        if: inputs.mode == 'apply'
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          deployment_name="tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "deployment_name=$deployment_name" >> "$GITHUB_OUTPUT"
+
+          az deployment group create \
+            --name "$deployment_name" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters "$PARAM_FILE" enableFrontDoor="$ENABLE_FRONT_DOOR" \
+            --only-show-errors \
+            --output json > deployment-result.json 2> deployment-error.txt
+          rc=$?
+
+          if [ "$rc" -eq 0 ]; then
+            echo "waiting_for_first_image=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cat deployment-error.txt >&2
+          az deployment group show \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$deployment_name" \
+            --query properties.error \
+            --output json > deployment-arm-error.json 2>/dev/null || true
+
+          # A new private ACR has no image during the first infrastructure pass.
+          # Treat only the exact missing-image condition as an expected bootstrap gate.
+          if [ "$ENABLE_FRONT_DOOR" = "false" ] && \
+             { grep -q 'MANIFEST_UNKNOWN' deployment-error.txt || \
+               grep -q 'MANIFEST_UNKNOWN' deployment-arm-error.json; }; then
+            echo "::warning::Core PROD resources were created, but the first Container App revision is waiting for the TokenScope image. Run prod-image-deploy.yml and then rerun this workflow."
+            echo "waiting_for_first_image=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::error::PROD infrastructure deployment failed"
+          cat deployment-arm-error.json >&2 || true
+          exit "$rc"
+
+      - name: Show deployment outputs
+        if: inputs.mode == 'apply' && steps.apply.outputs.waiting_for_first_image != 'true'
+        shell: bash
+        env:
+          DEPLOYMENT_NAME: ${{ steps.apply.outputs.deployment_name }}
+        run: |
+          set -euo pipefail
+          az deployment group show \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$DEPLOYMENT_NAME" \
+            --query properties.outputs \
+            --output json | tee deployment-outputs.json
+
+          {
+            echo "## TokenScope PROD infrastructure"
+            echo "- Resource group: $AZURE_RESOURCE_GROUP"
+            echo "- Image tag: $IMAGE_TAG"
+            echo "- Front Door enabled: $ENABLE_FRONT_DOOR"
+            echo '```json'
+            cat deployment-outputs.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show first-image next step
+        if: inputs.mode == 'apply' && steps.apply.outputs.waiting_for_first_image == 'true'
+        shell: bash
+        run: |
+          {
+            echo "## First PROD image required"
+            echo "1. Grant the GitHub PROD identity push access on PROD ACR."
+            echo "2. Grant the TokenScope managed identity pull access on PROD ACR."
+            echo "3. Make sure the private runner labelled tokenscope-prod is online."
+            echo "4. Run the PROD image workflow."
+            echo "5. Set the prod Environment variable IMAGE_TAG to the deployed immutable tag."
+            echo "6. Rerun this workflow with mode=apply."
+          } >> "$GITHUB_STEP_SUMMARY"

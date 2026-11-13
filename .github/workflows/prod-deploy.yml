@@ -1,31 +1,22 @@
+
 name: Deploy TokenScope PROD Infrastructure
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Review What-If or apply approved infrastructure'
+        description: 'Preview What-If or apply approved infrastructure'
         type: choice
-        options: [what-if, apply]
+        options:
+          - what-if
+          - apply
         default: what-if
         required: true
-      front_door_phase:
-        description: 'off=private; create=Front Door; finalize=public URLs and workers'
-        type: choice
-        options: [off, create, finalize]
-        default: off
-        required: true
-      front_door_hostname:
-        description: 'Finalization only: Front Door hostname, without https://'
-        type: string
-        required: false
-      front_door_instance_id:
-        description: 'Finalization only: X-Azure-FDID from frontDoorInstanceId output'
-        type: string
-        required: false
+
       confirm_production:
-        description: 'For apply enter DEPLOY-PROD'
+        description: 'For apply, type DEPLOY-PROD'
         type: string
+        default: ''
         required: false
 
 permissions:
@@ -38,35 +29,109 @@ concurrency:
 
 jobs:
   deploy:
-    name: PROD infrastructure ${{ inputs.mode }} / ${{ inputs.front_door_phase }}
+    name: PROD Infrastructure - ${{ inputs.mode }}
+
     runs-on: ubuntu-latest
+
+    # GitHub Environment where PROD secrets exist.
     environment: prod
+
     timeout-minutes: 120
+
     env:
+      # ============================================================
+      # PROD AZURE CONFIGURATION
+      # ============================================================
+
       AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-prd-helios-002
+
       EXPECTED_SUBSCRIPTION: 3796cf20-cb96-4457-914f-397760fe5834
+
       AZURE_LOCATION: westeurope
+
       PARAM_FILE: infra/parameters/prod.bicepparam
+
       MODE: ${{ inputs.mode }}
-      FRONT_DOOR_PHASE: ${{ inputs.front_door_phase }}
-      FRONT_DOOR_HOSTNAME: ${{ inputs.front_door_hostname }}
-      FRONT_DOOR_INSTANCE_ID: ${{ inputs.front_door_instance_id }}
+
       CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+
+      # ============================================================
+      # AZURE FRONT DOOR - CONTROL DIRECTLY IN CODE
+      # ============================================================
+      #
+      # PHASE 1: off
+      #   Front Door disabled.
+      #   Initial private infrastructure deployment.
+      #
+      # PHASE 2: create
+      #   Create Azure Front Door Premium.
+      #   Approve Private Link connection.
+      #
+      # PHASE 3: finalize
+      #   Configure Front Door enforcement,
+      #   public application URL, Entra callback
+      #   and scheduled worker base URL.
+      #
+      # IMPORTANT:
+      # Do not return to 'off' after finalization
+      # without planning the infrastructure changes.
+      #
+      # Change only this value for each phase.
+
+      FRONT_DOOR_PHASE: 'off'
+
+      # Keep empty for OFF and CREATE.
+      #
+      # After Front Door is created, obtain:
+      #
+      # frontDoorEndpointFqdn
+      # frontDoorInstanceId
+      #
+      # from Azure deployment outputs.
+      #
+      # Then populate these two values and
+      # change FRONT_DOOR_PHASE to 'finalize'.
+
+      FRONT_DOOR_HOSTNAME: ''
+
+      FRONT_DOOR_INSTANCE_ID: ''
+
+      # ============================================================
+      # PROD GITHUB ENVIRONMENT SECRETS
+      # ============================================================
+
       PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+
       PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+
       SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+
       HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+
       INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+
       OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+
       OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+
       OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+
       ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
 
     steps:
+
+      # ============================================================
+      # STEP 1: CHECKOUT REPOSITORY
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+
+      # ============================================================
+      # STEP 2: AZURE LOGIN USING PROD OIDC
+      # ============================================================
 
       - name: Login to PROD Azure using OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
@@ -75,130 +140,423 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Validate PROD target, secrets and phase
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f infra/main.bicep && test -f "$PARAM_FILE"
-          test "${{ vars.AZURE_RESOURCE_GROUP }}" = "$AZURE_RESOURCE_GROUP"
-          test "${{ vars.AZURE_SUBSCRIPTION_ID }}" = "$EXPECTED_SUBSCRIPTION"
-          test "${{ vars.AZURE_LOCATION }}" = "$AZURE_LOCATION"
-          test "$(az account show --query id -o tsv)" = "$EXPECTED_SUBSCRIPTION"
-          for name in PG_ADMIN_LOGIN PG_ADMIN_PASSWORD SESSION_SECRET HMAC_SESSION_KEY INTERNAL_WORKER_HMAC_KEY OIDC_SESSION_SECRET OIDC_AUTH_SESSION_SECRET OIDC_TOKEN_KEY ENTRA_CLIENT_SECRET; do
-            test -n "${!name:-}" || { echo "::error::Missing PROD secret $name"; exit 1; }
-          done
-          python3 - <<'PY'
-          import os, base64, binascii
-          try:
-              data = base64.b64decode(os.environ['OIDC_TOKEN_KEY'], validate=True)
-          except (ValueError, binascii.Error):
-              raise SystemExit('Invalid OIDC_TOKEN_KEY base64')
-          if len(data) != 32:
-              raise SystemExit('OIDC_TOKEN_KEY must decode to exactly 32 bytes')
-          PY
-          if [ "$MODE" = 'apply' ]; then
-            test "$CONFIRM_PRODUCTION" = 'DEPLOY-PROD' || { echo '::error::Expected DEPLOY-PROD'; exit 1; }
-          fi
-          if [ "$FRONT_DOOR_PHASE" = 'finalize' ]; then
-            [[ "$FRONT_DOOR_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]] || { echo '::error::Bad Front Door hostname'; exit 1; }
-            [[ "$FRONT_DOOR_INSTANCE_ID" =~ ^[a-fA-F0-9-]{36}$ ]] || { echo '::error::Bad Front Door ID'; exit 1; }
-          fi
-          az group show -n "$AZURE_RESOURCE_GROUP" -o none
+      # ============================================================
+      # STEP 3: VALIDATE PROD TARGET AND SECRETS
+      # ============================================================
 
-      - name: Prepare Front Door parameters
+      - name: Validate PROD target and required secrets
+        shell: bash
+        env:
+          CONFIGURED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          CONFIGURED_SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          CONFIGURED_LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: |
+          set -euo pipefail
+
+          echo "Validating PROD deployment configuration..."
+
+          test -f infra/main.bicep || {
+            echo "::error::main.bicep missing"
+            exit 1
+          }
+
+          test -f "$PARAM_FILE" || {
+            echo "::error::prod.bicepparam missing"
+            exit 1
+          }
+
+          test "$CONFIGURED_RESOURCE_GROUP" = \
+            "$AZURE_RESOURCE_GROUP" || {
+              echo "::error::Resource group mismatch"
+              exit 1
+            }
+
+          test "$CONFIGURED_SUBSCRIPTION" = \
+            "$EXPECTED_SUBSCRIPTION" || {
+              echo "::error::Subscription variable mismatch"
+              exit 1
+            }
+
+          test "$CONFIGURED_LOCATION" = \
+            "$AZURE_LOCATION" || {
+              echo "::error::Azure location mismatch"
+              exit 1
+            }
+
+          ACTUAL_SUB="$(az account show \
+            --query id \
+            --output tsv)"
+
+          if [ "$ACTUAL_SUB" != "$EXPECTED_SUBSCRIPTION" ]; then
+            echo "::error::Wrong Azure subscription"
+            echo "Expected: $EXPECTED_SUBSCRIPTION"
+            echo "Actual: $ACTUAL_SUB"
+            exit 1
+          fi
+
+          for name in \
+            PG_ADMIN_LOGIN \
+            PG_ADMIN_PASSWORD \
+            SESSION_SECRET \
+            HMAC_SESSION_KEY \
+            INTERNAL_WORKER_HMAC_KEY \
+            OIDC_SESSION_SECRET \
+            OIDC_AUTH_SESSION_SECRET \
+            OIDC_TOKEN_KEY \
+            ENTRA_CLIENT_SECRET
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing PROD secret: $name"
+              exit 1
+            fi
+          done
+
+          python3 - <<'PY'
+          import os
+          import base64
+          import binascii
+
+          try:
+              token = base64.b64decode(
+                  os.environ["OIDC_TOKEN_KEY"],
+                  validate=True
+              )
+          except (ValueError, binascii.Error):
+              raise SystemExit(
+                  "ERROR: OIDC_TOKEN_KEY invalid Base64"
+              )
+
+          if len(token) != 32:
+              raise SystemExit(
+                  "ERROR: OIDC_TOKEN_KEY must decode to 32 bytes"
+              )
+
+          print("SUCCESS: PROD secrets validated")
+          PY
+
+          if [ "$MODE" = "apply" ]; then
+            if [ "$CONFIRM_PRODUCTION" != "DEPLOY-PROD" ]; then
+              echo "::error::Apply requires DEPLOY-PROD"
+              exit 1
+            fi
+          fi
+
+          az group show \
+            --name "$AZURE_RESOURCE_GROUP" \
+            --output none
+
+          echo "SUCCESS: PROD target validated"
+
+      # ============================================================
+      # STEP 4: PREPARE AZURE FRONT DOOR PARAMETERS
+      # ============================================================
+      #
+      # Sets variables for subsequent Bicep steps.
+      #
+      # OFF:
+      #   enableFrontDoor=false
+      #   All public URLs empty.
+      #
+      # CREATE:
+      #   enableFrontDoor=true
+      #   Public URLs and instance ID empty.
+      #
+      # FINALIZE:
+      #   enableFrontDoor=true
+      #   Configure real Front Door hostname,
+      #   X-Azure-FDID, Entra callback, and workers.
+      # ============================================================
+
+      - name: Prepare Azure Front Door parameters
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Front Door phase: $FRONT_DOOR_PHASE"
+
           case "$FRONT_DOOR_PHASE" in
+
             off)
-              echo 'ENABLE_FRONT_DOOR=false' >> "$GITHUB_ENV"
-              echo 'FRONT_DOOR_ID=' >> "$GITHUB_ENV"
-              echo 'APP_PUBLIC_ORIGIN=' >> "$GITHUB_ENV"
-              echo 'ENTRA_REDIRECT_URI=' >> "$GITHUB_ENV"
-              echo 'WORKER_BASE_URL=' >> "$GITHUB_ENV"
+
+              echo "ENABLE_FRONT_DOOR=false" >> "$GITHUB_ENV"
+
+              echo "FRONT_DOOR_ID=" >> "$GITHUB_ENV"
+
+              echo "APP_PUBLIC_ORIGIN=" >> "$GITHUB_ENV"
+
+              echo "ENTRA_REDIRECT_URI=" >> "$GITHUB_ENV"
+
+              echo "WORKER_BASE_URL=" >> "$GITHUB_ENV"
+
+              echo "Front Door disabled."
+
               ;;
+
             create)
-              echo 'ENABLE_FRONT_DOOR=true' >> "$GITHUB_ENV"
-              echo 'FRONT_DOOR_ID=' >> "$GITHUB_ENV"
-              echo 'APP_PUBLIC_ORIGIN=' >> "$GITHUB_ENV"
-              echo 'ENTRA_REDIRECT_URI=' >> "$GITHUB_ENV"
-              echo 'WORKER_BASE_URL=' >> "$GITHUB_ENV"
+
+              echo "ENABLE_FRONT_DOOR=true" >> "$GITHUB_ENV"
+
+              echo "FRONT_DOOR_ID=" >> "$GITHUB_ENV"
+
+              echo "APP_PUBLIC_ORIGIN=" >> "$GITHUB_ENV"
+
+              echo "ENTRA_REDIRECT_URI=" >> "$GITHUB_ENV"
+
+              echo "WORKER_BASE_URL=" >> "$GITHUB_ENV"
+
+              echo "Front Door creation enabled."
+
               ;;
+
             finalize)
-              echo 'ENABLE_FRONT_DOOR=true' >> "$GITHUB_ENV"
+
+              if ! [[ "$FRONT_DOOR_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]]; then
+                echo "::error::Invalid Front Door hostname"
+                exit 1
+              fi
+
+              if ! [[ "$FRONT_DOOR_INSTANCE_ID" =~ ^[a-fA-F0-9-]{36}$ ]]; then
+                echo "::error::Invalid Front Door instance ID"
+                exit 1
+              fi
+
+              echo "ENABLE_FRONT_DOOR=true" >> "$GITHUB_ENV"
+
               echo "FRONT_DOOR_ID=$FRONT_DOOR_INSTANCE_ID" >> "$GITHUB_ENV"
+
               echo "APP_PUBLIC_ORIGIN=https://$FRONT_DOOR_HOSTNAME" >> "$GITHUB_ENV"
+
               echo "ENTRA_REDIRECT_URI=https://$FRONT_DOOR_HOSTNAME/auth/entra/callback" >> "$GITHUB_ENV"
+
               echo "WORKER_BASE_URL=https://$FRONT_DOOR_HOSTNAME" >> "$GITHUB_ENV"
+
+              echo "Front Door finalization enabled."
+
               ;;
+
+            *)
+
+              echo "::error::Invalid Front Door phase: $FRONT_DOOR_PHASE"
+
+              exit 1
+
+              ;;
+
           esac
 
-      - name: Validate Bicep and ARM deployment
+      # ============================================================
+      # STEP 5: VALIDATE BICEP TEMPLATES
+      # ============================================================
+
+      - name: Validate PROD Bicep templates
         shell: bash
         run: |
           set -euo pipefail
-          az bicep build --file infra/main.bicep --stdout > /dev/null
-          az bicep build-params --file "$PARAM_FILE" --stdout > /dev/null
+
+          echo "Compiling PROD Bicep..."
+
+          az bicep build \
+            --file infra/main.bicep \
+            --stdout > /dev/null
+
+          az bicep build-params \
+            --file "$PARAM_FILE" \
+            --stdout > /dev/null
+
+          echo "SUCCESS: PROD Bicep compiled"
+
+      # ============================================================
+      # STEP 6: VALIDATE ARM DEPLOYMENT
+      # ============================================================
+
+      - name: Validate PROD ARM deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
           az deployment group validate \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" enableFrontDoor="$ENABLE_FRONT_DOOR" \
-            --only-show-errors --output none
+            --parameters "$PARAM_FILE" \
+              enableFrontDoor="$ENABLE_FRONT_DOOR" \
+              frontDoorId="$FRONT_DOOR_ID" \
+              appPublicOrigin="$APP_PUBLIC_ORIGIN" \
+              entraIdRedirectUri="$ENTRA_REDIRECT_URI" \
+              workerBaseUrl="$WORKER_BASE_URL" \
+            --only-show-errors \
+            --output none
+
+          echo "SUCCESS: PROD ARM validation completed"
+
+      # ============================================================
+      # STEP 7: PREVIEW PROD INFRASTRUCTURE CHANGES
+      # ============================================================
 
       - name: Review PROD infrastructure What-If
         shell: bash
         run: |
           set -euo pipefail
+
           az deployment group what-if \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" enableFrontDoor="$ENABLE_FRONT_DOOR" \
-            --result-format FullResourcePayloads --output json > what-if.json
+            --parameters "$PARAM_FILE" \
+              enableFrontDoor="$ENABLE_FRONT_DOOR" \
+              frontDoorId="$FRONT_DOOR_ID" \
+              appPublicOrigin="$APP_PUBLIC_ORIGIN" \
+              entraIdRedirectUri="$ENTRA_REDIRECT_URI" \
+              workerBaseUrl="$WORKER_BASE_URL" \
+            --result-format FullResourcePayloads \
+            --output json > what-if.json
+
           python3 - <<'PY'
           import json
-          x = json.load(open('what-if.json', encoding='utf-8'))
-          changes = x.get('changes', [])
+
+          with open("what-if.json", encoding="utf-8") as f:
+              result = json.load(f)
+
+          changes = result.get("changes", [])
+
+          print("\nPROD infrastructure changes:")
+
           for item in changes:
-              print(item.get('changeType'), item.get('resourceId'))
+              print(
+                  item.get("changeType", "Unknown"),
+                  item.get("resourceId", "Unknown")
+              )
+
           if not changes:
-              print('No changes returned; verify complete what-if output if unexpected.')
-          blocked = [x for x in changes if x.get('changeType') in ('Delete', 'Unsupported')]
+              print("No changes returned.")
+
+          blocked = [
+              item
+              for item in changes
+              if item.get("changeType") in (
+                  "Delete",
+                  "Unsupported"
+              )
+          ]
+
           if blocked:
-              raise SystemExit('BLOCKED: Delete/Unsupported changes require remediation; no apply.')
+              for item in blocked:
+                  print(
+                      "BLOCKED:",
+                      item.get("changeType"),
+                      item.get("resourceId")
+                  )
+
+              raise SystemExit(
+                  "ERROR: Delete/Unsupported changes detected"
+              )
+
+          print("\nNo Delete/Unsupported changes detected.")
+          print("Review all Create/Modify/Deploy changes.")
           PY
-          echo 'Review ALL creates/modifications, especially PostgreSQL, network, Key Vault and RBAC.'
+
+      # ============================================================
+      # STEP 8: APPLY PROD INFRASTRUCTURE
+      # ============================================================
+      #
+      # Requires:
+      #   mode=apply
+      #   confirm_production=DEPLOY-PROD
+      #
+      # What-If is reviewed before application.
+      # GitHub environment approval should also be enabled.
+      # ============================================================
 
       - name: Apply approved PROD infrastructure
         if: ${{ inputs.mode == 'apply' }}
         shell: bash
         run: |
           set -euo pipefail
-          # Requires an independently approved plan. What-If is not an approval.
+
+          DEPLOYMENT_NAME="tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          echo "Deploying PROD infrastructure..."
+
           az deployment group create \
-            --name "tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --name "$DEPLOYMENT_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" enableFrontDoor="$ENABLE_FRONT_DOOR" \
-            --mode Incremental --only-show-errors --output json > result.json
+            --parameters "$PARAM_FILE" \
+              enableFrontDoor="$ENABLE_FRONT_DOOR" \
+              frontDoorId="$FRONT_DOOR_ID" \
+              appPublicOrigin="$APP_PUBLIC_ORIGIN" \
+              entraIdRedirectUri="$ENTRA_REDIRECT_URI" \
+              workerBaseUrl="$WORKER_BASE_URL" \
+            --mode Incremental \
+            --only-show-errors \
+            --output none
+
+          echo "DEPLOYMENT_NAME=$DEPLOYMENT_NAME" >> "$GITHUB_ENV"
+
+          echo "SUCCESS: PROD infrastructure deployment completed"
+
+      # ============================================================
+      # STEP 9: SHOW DEPLOYMENT OUTPUTS
+      # ============================================================
+
+      - name: Show PROD deployment outputs
+        if: ${{ inputs.mode == 'apply' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az deployment group show \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$DEPLOYMENT_NAME" \
+            --query properties.outputs \
+            --output json > deployment-outputs.json
+
           python3 - <<'PY'
           import json
-          x = json.load(open('result.json', encoding='utf-8'))
-          out = x.get('properties', {}).get('outputs', {})
-          for key in ('acrLoginServer', 'containerAppName', 'frontDoorEndpointFqdn', 'frontDoorInstanceId'):
-              value = out.get(key, {}).get('value', '')
+
+          with open(
+              "deployment-outputs.json",
+              encoding="utf-8"
+          ) as f:
+              outputs = json.load(f)
+
+          keys = (
+              "acrLoginServer",
+              "containerAppName",
+              "frontDoorEndpointFqdn",
+              "frontDoorInstanceId",
+              "frontDoorPrivateLinkRequestMessage"
+          )
+
+          for key in keys:
+              value = outputs.get(key, {}).get("value", "")
+
               if value:
-                  print(f'{key}: {value}')
+                  print(f"{key}: {value}")
           PY
 
-      - name: Summary
+      # ============================================================
+      # STEP 10: DEPLOYMENT SUMMARY
+      # ============================================================
+
+      - name: PROD Deployment Summary
         if: always()
         shell: bash
         run: |
           {
-            echo '## PROD Infrastructure'
+            echo "## TokenScope PROD Infrastructure"
+            echo ""
             echo "- Mode: $MODE"
-            echo "- Phase: $FRONT_DOOR_PHASE"
             echo "- Resource group: $AZURE_RESOURCE_GROUP"
-            echo '- Front Door Private Link approval may require an operator during apply.'
+            echo "- Azure location: $AZURE_LOCATION"
+            echo "- Front Door phase: $FRONT_DOOR_PHASE"
+            echo ""
+            echo "Front Door Private Link approval may be required."
+            echo ""
+            echo "Check the Container App revision and application health."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Azure logout
+      # ============================================================
+      # STEP 11: AZURE LOGOUT
+      # ============================================================
+
+      - name: Azure Logout
         if: always()
-        run: az logout || true
+        shell: bash
+        run: |
+          az logout || true

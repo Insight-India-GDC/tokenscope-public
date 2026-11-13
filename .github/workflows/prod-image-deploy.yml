@@ -1,21 +1,193 @@
+name: Build and Push TokenScope PROD Image
 
-      - name: Test PROD ACR private connectivity
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: 'Type PUSH-PROD to build and push the approved commit to PROD ACR'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: tokenscope-prod-image
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    name: Build and push PROD image only
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - tokenscope-prod
+    environment: prod
+    timeout-minutes: 120
+
+    env:
+      EXPECTED_SUBSCRIPTION: '3796cf20-cb96-4457-914f-397760fe5834'
+      AZURE_RESOURCE_GROUP: 'rg-westeurope-t1-amd-prd-helios-002'
+      ACR_NAME: 'crtokenscopeigdcprodproductionweu'
+      IMAGE_NAME: 'tokenscope'
+      CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+
+    steps:
+      - name: Check out selected commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Validate confirmation and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CONFIRM_PRODUCTION" = 'PUSH-PROD' || {
+            echo '::error::Enter PUSH-PROD to authorize a PROD image push.'
+            exit 1
+          }
+          test -f Dockerfile || {
+            echo '::error::Dockerfile not found in repository root.'
+            exit 1
+          }
+          command -v docker >/dev/null || {
+            echo '::error::Docker is not installed on the self-hosted runner.'
+            exit 1
+          }
+          docker info >/dev/null
+          IMAGE_TAG="$(git rev-parse HEAD)"
+          test -n "$IMAGE_TAG"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "Selected commit: $IMAGE_TAG"
+          echo "Runner: $RUNNER_NAME"
+
+      - name: Azure login using PROD OIDC
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Diagnose PROD ACR private DNS and HTTPS from runner
         shell: bash
         run: |
           set -euo pipefail
 
+          REGISTRY_HOST="${ACR_NAME}.azurecr.io"
+          DATA_HOST="${ACR_NAME}.westeurope.data.azurecr.io"
+
           echo "Runner: $RUNNER_NAME"
+          echo "Registry API host: $REGISTRY_HOST (expected private IP 10.0.2.37)"
+          echo "Image data host: $DATA_HOST (expected private IP 10.0.2.36)"
 
-          echo "Checking registry DNS..."
-          getent ahostsv4 \
-            crtokenscopeigdcprodproductionweu.azurecr.io || true
+          echo '--- DNS: registry API ---'
+          if ! getent ahostsv4 "$REGISTRY_HOST"; then
+            echo "::error::Registry hostname does not resolve on the GitHub runner. Check private DNS zone links/forwarders."
+            exit 1
+          fi
 
-          echo "Checking data endpoint DNS..."
-          getent ahostsv4 \
-            crtokenscopeigdcprodproductionweu.westeurope.data.azurecr.io || true
+          echo '--- DNS: image data endpoint ---'
+          if ! getent ahostsv4 "$DATA_HOST"; then
+            echo "::error::Image data hostname does not resolve on the GitHub runner. Check ACR private DNS and forwarding."
+            exit 1
+          fi
 
-          echo "Testing login endpoint..."
-          curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
-            --connect-timeout 10 \
-            --max-time 15 \
-            https://crtokenscopeigdcprodproductionweu.azurecr.io/v2/ || true
+          echo '--- HTTPS: registry /v2/ ---'
+          # HTTP 401 is normal before authentication. curl exit 0 means
+          # the host was reached, even when the server returns HTTP 401.
+          if ! curl --silent --show-error --output /dev/null \
+            --write-out 'Registry HTTP: %{http_code}; remote IP: %{remote_ip}\n' \
+            --connect-timeout 10 --max-time 20 \
+            "https://${REGISTRY_HOST}/v2/"; then
+            echo '::error::Registry HTTPS failed. Check routing, NSGs, firewall and DNS from the runner.'
+            exit 1
+          fi
+
+          echo '--- HTTPS: regional image data endpoint ---'
+          # The root URL may return 403/404. Connectivity and TLS are what matter.
+          if ! curl --silent --show-error --output /dev/null \
+            --write-out 'Data HTTP: %{http_code}; remote IP: %{remote_ip}\n' \
+            --connect-timeout 10 --max-time 20 \
+            "https://${DATA_HOST}/"; then
+            echo '::error::Image data endpoint HTTPS failed. Check routing, NSGs and firewall.'
+            exit 1
+          fi
+
+          echo 'DNS and HTTPS connectivity tests completed. ACR login follows.'
+
+      - name: Verify PROD subscription, registry, and private access
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL_SUB="$(az account show --query id -o tsv)"
+          test "$ACTUAL_SUB" = "$EXPECTED_SUBSCRIPTION" || {
+            echo "::error::Wrong Azure subscription: $ACTUAL_SUB"
+            exit 1
+          }
+          az group show -n "$AZURE_RESOURCE_GROUP" --output none
+          LOGIN_SERVER="$(az acr show \
+            -n "$ACR_NAME" \
+            -g "$AZURE_RESOURCE_GROUP" \
+            --query loginServer -o tsv)"
+          test "$LOGIN_SERVER" = "${ACR_NAME}.azurecr.io" || {
+            echo "::error::Unexpected ACR login server: $LOGIN_SERVER"
+            exit 1
+          }
+          echo "ACR_LOGIN_SERVER=$LOGIN_SERVER" >> "$GITHUB_ENV"
+          echo "Registry: $LOGIN_SERVER"
+          echo 'Attempting private ACR login from this runner...'
+          az acr login --name "$ACR_NAME"
+
+      - name: Build Docker image for approved commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}"
+          docker build \
+            --build-arg "GIT_COMMIT_SHA=$IMAGE_TAG" \
+            --tag "${IMAGE}:${IMAGE_TAG}" \
+            --tag "${IMAGE}:latest" \
+            .
+
+      - name: Push commit-tagged image and latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}"
+          docker push "${IMAGE}:${IMAGE_TAG}"
+          docker push "${IMAGE}:latest"
+
+      - name: Verify images in PROD registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}"
+          docker manifest inspect "${IMAGE}:${IMAGE_TAG}" >/dev/null
+          docker manifest inspect "${IMAGE}:latest" >/dev/null
+          az acr repository show-tags \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --output table
+          echo "Verified: ${IMAGE}:${IMAGE_TAG}"
+          echo "Verified: ${IMAGE}:latest"
+          echo 'Image pushed successfully. Container App has NOT been updated.'
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## TokenScope PROD — Image build/push'
+            echo "- Registry: ${ACR_NAME}.azurecr.io"
+            echo "- Repository: ${IMAGE_NAME}"
+            echo "- Git commit: ${IMAGE_TAG:-unknown}"
+            echo '- This workflow DOES NOT deploy/update the Container App.'
+            echo '- Next: review infrastructure What-If, then provision the Container App.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Azure logout
+        if: always()
+        shell: bash
+        run: az logout || true

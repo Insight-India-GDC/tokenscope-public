@@ -1,4 +1,3 @@
-
 name: Build and Push TokenScope PROD Image
 
 on:
@@ -70,6 +69,27 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Diagnose PROD ACR private connectivity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACR_HOST="${ACR_NAME}.azurecr.io"
+          echo "Runner: ${RUNNER_NAME}"
+          echo "Registry: ${ACR_HOST}"
+          echo "Checking DNS resolution..."
+          getent ahostsv4 "$ACR_HOST" || true
+
+          echo "Checking HTTPS connectivity..."
+          curl -v --connect-timeout 10 --max-time 20 \
+            "https://${ACR_HOST}/v2/" \
+            --output /dev/null || true
+
+          echo "Running ACR health diagnostics..."
+          az acr check-health --name "$ACR_NAME" --yes || true
+
+          echo "Diagnostic completed. Inspect DNS/IP, curl status and ACR health above."
 
       - name: Verify PROD subscription, registry, and private access
         shell: bash

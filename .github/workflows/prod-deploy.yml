@@ -1,4 +1,3 @@
-
 name: Deploy TokenScope PROD Infrastructure
 
 on:
@@ -84,6 +83,9 @@ jobs:
       # managed identity RBAC and diagnostic settings.
 
       PROD_DISABLE_GEO_REDUNDANT_BACKUP: 'true'
+
+      # TEMPORARY EXCEPTION: set true ONLY after PROD owner approves no HA.
+      PROD_DISABLE_POSTGRES_HA: 'true'
 
       DEPLOY_MONITORING_ALERTS: 'false'
 
@@ -362,13 +364,32 @@ jobs:
                   1
               )
 
-              pg_file.write_text(
-                  pg_content,
-                  encoding="utf-8"
-              )
-
               print("PostgreSQL geo-redundant backup disabled.")
-              print("Backup retention and HA unchanged.")
+
+          # PostgreSQL HA is separate from geo-redundant backup.
+          # Only apply the PROD exception if explicitly enabled.
+          if os.environ["PROD_DISABLE_POSTGRES_HA"] == "true":
+              old_ha = (
+                  "mode: environment == 'production' "
+                  "? 'ZoneRedundant' : 'Disabled'"
+              )
+              new_ha = "mode: 'Disabled'"
+
+              if pg_content.count(old_ha) != 1:
+                  raise SystemExit(
+                      "ERROR: PostgreSQL HA expression "
+                      "not found exactly once."
+                  )
+
+              pg_content = pg_content.replace(old_ha, new_ha, 1)
+              print("PostgreSQL HA disabled for PROD (approved exception).")
+
+          pg_file.write_text(
+              pg_content,
+              encoding="utf-8"
+          )
+          print("PostgreSQL Bicep overrides saved to temporary copy.")
+
 
           # ================================================
           # MONITORING METRIC ALERT OVERRIDE
@@ -469,7 +490,7 @@ jobs:
 
           echo "PROD_INFRA=$PROD_INFRA" >> "$GITHUB_ENV"
 
-      
+
       # ============================================================
       # STEP 7: PREPARE TEMPORARY PROD PARAMETERS
       #
@@ -690,6 +711,7 @@ jobs:
             echo "- Front Door phase: $FRONT_DOOR_PHASE"
             echo ""
             echo "- PostgreSQL geo backup override: $PROD_DISABLE_GEO_REDUNDANT_BACKUP"
+            echo "- PostgreSQL HA disabled (temporary exception): $PROD_DISABLE_POSTGRES_HA"
             echo "- Monitoring alerts enabled: $DEPLOY_MONITORING_ALERTS"
             echo "- Application alerts enabled: $DEPLOY_APP_ALERTS"
             echo ""

@@ -55,6 +55,9 @@ jobs:
       #ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       IMAGE_TAG: ${{ vars.IMAGE_TAG }}
       FRONT_DOOR_ID: ${{ vars.FRONT_DOOR_ID }}
+      APP_PUBLIC_ORIGIN: ${{ vars.APP_PUBLIC_ORIGIN }}
+      ENTRA_REDIRECT_URI: ${{ vars.ENTRA_REDIRECT_URI }}
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
 
     steps:
       - name: Checkout repository

@@ -1,37 +1,36 @@
-
-name: Deploy TokenScope PROD - Complete
+name: Deploy TokenScope PROD - Complete (Existing Private ACR)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'what-if previews; apply deploys approved changes'
+        description: 'Preview or apply approved changes'
         type: choice
-        options:
-          - what-if
-          - apply
+        options: [what-if, apply]
         default: what-if
         required: true
-
       front_door_phase:
-        description: 'off = private app; create = Front Door; finalize = public URLs'
+        description: 'off=private only; create=Front Door; finalize=auth and workers'
         type: choice
-        options:
-          - off
-          - create
-          - finalize
+        options: [off, create, finalize]
         default: off
         required: true
-
-      confirm_production:
-        description: 'For apply, type DEPLOY-PROD'
+      front_door_hostname:
+        description: 'For finalize only: actual Front Door hostname without https://'
         type: string
-        default: ''
+        required: false
+      front_door_instance_id:
+        description: 'For finalize only: frontDoorInstanceId from Bicep outputs (X-Azure-FDID)'
+        type: string
+        required: false
+      confirm_production:
+        description: 'For apply: type DEPLOY-PROD'
+        type: string
         required: false
 
 permissions:
-  id-token: write
   contents: read
+  id-token: write
 
 concurrency:
   group: tokenscope-prod-complete
@@ -39,448 +38,191 @@ concurrency:
 
 jobs:
   deploy:
-    name: Build Image and Deploy PROD Infrastructure
-
-    # PROD private runner must be registered and able
-    # to access the private PROD ACR.
-    runs-on:
-      - self-hosted
-      - Linux
-      - X64
-      - tokenscope-prod
-
-    # GitHub Environment = prod
-    # Bicep environment = production
+    name: PROD ${{ inputs.mode }} / Front Door ${{ inputs.front_door_phase }}
+    runs-on: [self-hosted, Linux, X64, tokenscope-prod]
     environment: prod
-
     timeout-minutes: 120
-
     env:
-      # ============================================================
-      # PROD Azure resources
-      # ============================================================
-
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       EXPECTED_SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      ACR_NAME: ${{ vars.ACR_NAME }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      # Derived EXACTLY from main.bicep: nameSuffix = projectName-env-weu.
+      # The ACR module uses replace('cr${nameSuffix}', '-', '').
+      ACR_NAME: crtokenscopeigdcprodproductionweu
       IMAGE_NAME: tokenscope
-      CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
-
+      IMAGE_TAG: ${{ github.sha }}
       PARAM_FILE: infra/parameters/prod.bicepparam
-
       MODE: ${{ inputs.mode }}
       FRONT_DOOR_PHASE: ${{ inputs.front_door_phase }}
+      FRONT_DOOR_HOSTNAME: ${{ inputs.front_door_hostname }}
+      FRONT_DOOR_INSTANCE_ID: ${{ inputs.front_door_instance_id }}
       CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
-
-      ENABLE_FRONT_DOOR: ${{ inputs.front_door_phase == 'off' && 'false' || 'true' }}
-
-      # Docker image is tagged with the selected Git commit SHA.
-      IMAGE_TAG: ${{ github.sha }}
-
-      # ============================================================
-      # Azure Front Door configuration
-      # ============================================================
-
-      FRONT_DOOR_ID: ${{ vars.FRONT_DOOR_ID }}
-      APP_PUBLIC_ORIGIN: ${{ vars.APP_PUBLIC_ORIGIN }}
-      ENTRA_REDIRECT_URI: ${{ vars.ENTRA_REDIRECT_URI }}
-      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
-
-      # ============================================================
-      # PROD application secrets
-      # ============================================================
-
       PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
       PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-
       SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
       HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
       INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-
       OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
       OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
       OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-
       ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
 
-      # ============================================================
-      # Optional application credentials
-      # ============================================================
-
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GH_PAT_PARTNER_DEMO: ${{ secrets.GH_PAT_PARTNER_DEMO }}
-      GH_PAT_PRODUCTION: ${{ secrets.GH_PAT_PRODUCTION }}
-      GH_PAT_ENTERPRISE_NFR: ${{ secrets.GH_PAT_ENTERPRISE_NFR }}
-      GH_APP_KEY_PARTNER_DEMO: ${{ secrets.GH_APP_KEY_PARTNER_DEMO }}
-
     steps:
-
-      # ============================================================
-      # STEP 1: Checkout selected Git commit
-      # ============================================================
-
-      - name: Checkout repository
+      - name: Checkout selected commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
 
-      # ============================================================
-      # STEP 2: Azure login using PROD OIDC
-      # ============================================================
-
-      - name: Azure Login using PROD OIDC
+      - name: Azure login using PROD OIDC
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # ============================================================
-      # STEP 3: Validate PROD target and secrets
-      # ============================================================
-
-      - name: Validate PROD target and required secrets
+      - name: Validate PROD subscription, secrets and phase
         shell: bash
         run: |
           set -euo pipefail
-
           test -f infra/main.bicep
           test -f "$PARAM_FILE"
-
-          for name in \
-            AZURE_RESOURCE_GROUP EXPECTED_SUBSCRIPTION \
-            ACR_NAME CONTAINER_APP_NAME \
-            PG_ADMIN_LOGIN PG_ADMIN_PASSWORD \
-            SESSION_SECRET HMAC_SESSION_KEY \
-            INTERNAL_WORKER_HMAC_KEY \
-            OIDC_SESSION_SECRET OIDC_AUTH_SESSION_SECRET \
-            OIDC_TOKEN_KEY ENTRA_CLIENT_SECRET
-          do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::Missing PROD setting: $name"
-              exit 1
-            fi
+          test "$AZURE_RESOURCE_GROUP" = 'rg-westeurope-t1-amd-prd-helios-002'
+          test "$EXPECTED_SUBSCRIPTION" = '3796cf20-cb96-4457-914f-397760fe5834'
+          test "$AZURE_LOCATION" = 'westeurope'
+          test "$(az account show --query id -o tsv)" = "$EXPECTED_SUBSCRIPTION"
+          for name in PG_ADMIN_LOGIN PG_ADMIN_PASSWORD SESSION_SECRET HMAC_SESSION_KEY INTERNAL_WORKER_HMAC_KEY OIDC_SESSION_SECRET OIDC_AUTH_SESSION_SECRET OIDC_TOKEN_KEY ENTRA_CLIENT_SECRET; do
+            test -n "${!name:-}" || { echo "::error::Missing PROD secret: $name"; exit 1; }
           done
-
-          actual="$(az account show --query id -o tsv)"
-
-          test "$actual" = "$EXPECTED_SUBSCRIPTION" || {
-            echo "::error::Wrong Azure subscription: $actual"
-            exit 1
-          }
-
-          if [ "$MODE" = "apply" ]; then
-            test "$CONFIRM_PRODUCTION" = "DEPLOY-PROD" || {
-              echo "::error::Apply requires DEPLOY-PROD"
-              exit 1
-            }
-          fi
-
           python3 - <<'PY'
-          import os
-          import base64
-          import binascii
-
+          import os, base64, binascii
           try:
-              raw = base64.b64decode(
-                  os.environ['OIDC_TOKEN_KEY'],
-                  validate=True
-              )
-          except (binascii.Error, ValueError):
-              raise SystemExit(
-                  'OIDC_TOKEN_KEY must be valid Base64'
-              )
-
-          if len(raw) != 32:
-              raise SystemExit(
-                  'OIDC_TOKEN_KEY must decode to 32 bytes'
-              )
-
-          for name in (
-              'OIDC_SESSION_SECRET',
-              'OIDC_AUTH_SESSION_SECRET'
-          ):
-              if len(os.environ[name]) < 48:
-                  raise SystemExit(
-                      f'{name} must contain at least 48 characters'
-                  )
-
-          print('SUCCESS: PROD secrets validated')
+              v = base64.b64decode(os.environ['OIDC_TOKEN_KEY'], validate=True)
+          except (ValueError, binascii.Error):
+              raise SystemExit('OIDC_TOKEN_KEY must be valid base64')
+          if len(v) != 32:
+              raise SystemExit('OIDC_TOKEN_KEY must decode to 32 bytes')
           PY
-
-          az group show \
-            --name "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          az acr show \
-            --name "$ACR_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          az containerapp show \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          # During Front Door finalization,
-          # the actual public URLs must exist.
-          if [ "$FRONT_DOOR_PHASE" = "finalize" ]; then
-
-            for name in \
-              APP_PUBLIC_ORIGIN \
-              ENTRA_REDIRECT_URI \
-              WORKER_BASE_URL
-            do
-              test -n "${!name:-}" || {
-                echo "::error::$name required for finalize phase"
-                exit 1
-              }
-            done
-
-            [[ "$APP_PUBLIC_ORIGIN" == https://* ]] || exit 1
-            [[ "$ENTRA_REDIRECT_URI" == https://* ]] || exit 1
-            [[ "$WORKER_BASE_URL" == https://* ]] || exit 1
+          if [ "$MODE" = apply ]; then
+            test "$CONFIRM_PRODUCTION" = 'DEPLOY-PROD' || { echo '::error::Confirm DEPLOY-PROD'; exit 1; }
           fi
+          if [ "$FRONT_DOOR_PHASE" = finalize ]; then
+            [[ "$FRONT_DOOR_HOSTNAME" =~ ^[a-zA-Z0-9.-]+$ ]] || { echo '::error::Invalid Front Door hostname'; exit 1; }
+            [[ "$FRONT_DOOR_INSTANCE_ID" =~ ^[a-fA-F0-9-]{36}$ ]] || { echo '::error::Invalid Front Door instance ID'; exit 1; }
+          fi
+          az group show --name "$AZURE_RESOURCE_GROUP" --output none
 
-          echo "Runner: $RUNNER_NAME / $(hostname)"
-          echo "SUCCESS: PROD target validated"
-
-      # ============================================================
-      # STEP 4: Validate Docker and private PROD ACR access
-      # ============================================================
-
-      - name: Validate Docker and private PROD ACR access
+      - name: Require existing private PROD ACR before image build
         shell: bash
         run: |
           set -euo pipefail
-
+          if ! az acr show --name "$ACR_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --output none 2>/dev/null; then
+            echo "::error::PROD ACR $ACR_NAME does not exist. main.bicep cannot safely bootstrap this private, image-dependent stack in one pass. Provision private ACR/networking/runner first."
+            exit 1
+          fi
           docker info >/dev/null
-
-          echo "Resolving ${ACR_NAME}.azurecr.io"
-
           getent ahostsv4 "${ACR_NAME}.azurecr.io"
-
-          status="$(curl -sS \
-            -o /dev/null \
-            -w '%{http_code}' \
-            --connect-timeout 10 \
-            --max-time 30 \
-            "https://${ACR_NAME}.azurecr.io/v2/")"
-
-          case "$status" in
-            200|401)
-              echo "SUCCESS: PROD ACR reachable (HTTP $status)"
-              ;;
-            *)
-              echo "::error::PROD ACR returned HTTP $status"
-              exit 1
-              ;;
-          esac
-
-          if [ "$MODE" = "apply" ]; then
+          echo 'Check that this hostname resolves through the approved private network.'
+          if [ "$MODE" = apply ]; then
             az acr login --name "$ACR_NAME"
-            echo "SUCCESS: Authenticated to PROD ACR"
           fi
 
-      # ============================================================
-      # STEP 5: Validate PROD Bicep templates and parameters
-      # ============================================================
-
-      - name: Validate PROD Bicep templates
+      - name: Validate Bicep and prepare phase parameters
         shell: bash
         run: |
           set -euo pipefail
+          az bicep build --file infra/main.bicep --stdout >/dev/null
+          az bicep build-params --file "$PARAM_FILE" --stdout >/dev/null
+          if [ "$FRONT_DOOR_PHASE" = off ]; then
+            echo 'ENABLE_FRONT_DOOR=false' >> "$GITHUB_ENV"
+          else
+            echo 'ENABLE_FRONT_DOOR=true' >> "$GITHUB_ENV"
+          fi
+          if [ "$FRONT_DOOR_PHASE" = finalize ]; then
+            echo "PUBLIC_ORIGIN=https://${FRONT_DOOR_HOSTNAME}" >> "$GITHUB_ENV"
+            echo "REDIRECT_URI=https://${FRONT_DOOR_HOSTNAME}/auth/entra/callback" >> "$GITHUB_ENV"
+          fi
 
-          az bicep build \
-            --file infra/main.bicep \
-            --stdout >/dev/null
-
-          az bicep build-params \
-            --file "$PARAM_FILE" \
-            --stdout >/dev/null
-
-          az deployment group validate \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" \
-              enableFrontDoor="$ENABLE_FRONT_DOOR" \
-            --only-show-errors \
-            --output none
-
-          echo "SUCCESS: PROD Bicep validation completed"
-
-      # ============================================================
-      # STEP 6: Build and push PROD Docker image
-      #
-      # This only happens in apply mode.
-      # ============================================================
-
-      - name: Build and push PROD Docker image
+      - name: Build and push selected immutable image
         if: ${{ inputs.mode == 'apply' }}
         shell: bash
         run: |
           set -euo pipefail
+          image="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+          docker build -t "$image" .
+          docker push "$image"
+          az acr repository show --name "$ACR_NAME" --image "${IMAGE_NAME}:${IMAGE_TAG}" --output none
 
-          image="${ACR_NAME}.azurecr.io/${IMAGE_NAME}"
-
-          echo "Building PROD image: ${image}:${IMAGE_TAG}"
-
-          docker build \
-            -t "${image}:${IMAGE_TAG}" \
-            .
-
-          docker push "${image}:${IMAGE_TAG}"
-
-          az acr repository show \
-            --name "$ACR_NAME" \
-            --image "${IMAGE_NAME}:${IMAGE_TAG}" \
-            --output none
-
-          echo "SUCCESS: PROD image pushed and verified"
-
-      # ============================================================
-      # STEP 7: Preview PROD infrastructure changes
-      # ============================================================
-
-      - name: Preview PROD infrastructure changes
+      - name: Preview infrastructure changes
         shell: bash
         run: |
           set -euo pipefail
+          args=(enableFrontDoor="$ENABLE_FRONT_DOOR" imageTag="$IMAGE_TAG")
+          if [ "$FRONT_DOOR_PHASE" = finalize ]; then
+            args+=(frontDoorId="$FRONT_DOOR_INSTANCE_ID" appPublicOrigin="$PUBLIC_ORIGIN" workerBaseUrl="$PUBLIC_ORIGIN" entraIdRedirectUri="$REDIRECT_URI")
+          fi
+          az deployment group validate --resource-group "$AZURE_RESOURCE_GROUP" --parameters "$PARAM_FILE" "${args[@]}" --only-show-errors --output none
+          az deployment group what-if --resource-group "$AZURE_RESOURCE_GROUP" --parameters "$PARAM_FILE" "${args[@]}" --result-format FullResourcePayloads
+          az deployment group what-if --resource-group "$AZURE_RESOURCE_GROUP" --parameters "$PARAM_FILE" "${args[@]}" --output json > prod-whatif.json
+          python3 - <<'PY'
+          import json, os
+          data = json.load(open('prod-whatif.json', encoding='utf-8'))
+          bad = [(c.get('changeType'), c.get('resourceId')) for c in data.get('changes', []) if c.get('changeType') in ('Delete','Unsupported')]
+          for kind, resource in bad:
+              print(f'BLOCKED {kind}: {resource}')
+          if bad and os.environ['MODE'] == 'apply':
+              raise SystemExit('Refusing apply: Delete/Unsupported changes must be investigated')
+          PY
+          echo 'What-If is informational for all other change types. The production reviewer must approve the changes separately.'
 
-          az deployment group what-if \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" \
-              enableFrontDoor="$ENABLE_FRONT_DOOR" \
-            --result-format FullResourcePayloads
-
-          echo "Review PostgreSQL, networking, Key Vault and RBAC changes"
-
-      # ============================================================
-      # STEP 8: Block destructive or unsupported changes
-      # ============================================================
-
-      - name: Block destructive or unsupported PROD changes
+      - name: Deploy approved PROD infrastructure
         if: ${{ inputs.mode == 'apply' }}
         shell: bash
         run: |
           set -euo pipefail
-
-          az deployment group what-if \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" \
-              enableFrontDoor="$ENABLE_FRONT_DOOR" \
-            --output json > what-if.json
-
+          args=(enableFrontDoor="$ENABLE_FRONT_DOOR" imageTag="$IMAGE_TAG")
+          if [ "$FRONT_DOOR_PHASE" = finalize ]; then
+            args+=(frontDoorId="$FRONT_DOOR_INSTANCE_ID" appPublicOrigin="$PUBLIC_ORIGIN" workerBaseUrl="$PUBLIC_ORIGIN" entraIdRedirectUri="$REDIRECT_URI")
+          fi
+          deploy_name="tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          az deployment group create --name "$deploy_name" --resource-group "$AZURE_RESOURCE_GROUP" --parameters "$PARAM_FILE" "${args[@]}" --mode Incremental --only-show-errors --output json > deployment-result.json
           python3 - <<'PY'
           import json
-
-          with open('what-if.json', encoding='utf-8') as f:
-              result = json.load(f)
-
-          blocked = []
-
-          for change in result.get('changes', []):
-              kind = change.get('changeType')
-
-              if kind in ('Delete', 'Unsupported'):
-                  blocked.append((
-                      kind,
-                      change.get('resourceId', 'unknown')
-                  ))
-
-          if blocked:
-              for kind, resource in blocked:
-                  print(f'BLOCKED {kind}: {resource}')
-
-              raise SystemExit(
-                  'PROD deployment blocked: review What-If'
-              )
-
-          print('No Delete/Unsupported changes detected.')
-          print('Human review of other changes is still required.')
+          result = json.load(open('deployment-result.json', encoding='utf-8'))
+          outputs = result.get('properties', {}).get('outputs', {})
+          for key in ('containerAppName','acrLoginServer','frontDoorEndpointFqdn','frontDoorInstanceId'):
+              print(f'{key}: {outputs.get(key,{}).get("value", "not returned")}')
           PY
+          app_name="$(python3 -c 'import json; print(json.load(open("deployment-result.json"))["properties"]["outputs"]["containerAppName"]["value"])')"
+          test -n "$app_name"
+          echo "CONTAINER_APP_NAME=$app_name" >> "$GITHUB_ENV"
 
-      # ============================================================
-      # STEP 9: Deploy PROD infrastructure
-      # ============================================================
-
-      - name: Deploy PROD infrastructure
+      - name: Deploy and verify selected PROD image
         if: ${{ inputs.mode == 'apply' }}
         shell: bash
         run: |
           set -euo pipefail
-
-          az deployment group create \
-            --name "tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" \
-              enableFrontDoor="$ENABLE_FRONT_DOOR" \
-            --mode Incremental \
-            --only-show-errors \
-            --output json
-
-          echo "SUCCESS: PROD infrastructure deployed"
-
-      # ============================================================
-      # STEP 10: Deploy immutable PROD image
-      # ============================================================
-
-      - name: Deploy immutable PROD image
-        if: ${{ inputs.mode == 'apply' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
           image="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+          az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$image" --output none
+          actual="$(az containerapp show --name "$CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query 'properties.template.containers[0].image' -o tsv)"
+          test "$actual" = "$image" || { echo "::error::Deployed image mismatch: $actual"; exit 1; }
+          az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --output table
+          echo "Configured image: $actual"
+          echo 'Verify revision health, sign-in, DB connectivity and application data before promoting traffic.'
 
-          echo "Deploying PROD image: $image"
-
-          az containerapp update \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "$image" \
-            --output none
-
-          deployed="$(az containerapp show \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query 'properties.template.containers[0].image' \
-            --output tsv)"
-
-          test "$deployed" = "$image" || {
-            echo "::error::Unexpected deployed image: $deployed"
-            exit 1
-          }
-
-          echo "SUCCESS: PROD image configured: $deployed"
-
-          az containerapp revision list \
-            --name "$CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output table
-
-      # ============================================================
-      # STEP 11: Deployment summary
-      # ============================================================
-
-      - name: Summarize PROD deployment
+      - name: Deployment summary
         if: always()
         shell: bash
         run: |
           {
-            echo "## TokenScope PROD Complete Deployment"
+            echo '## TokenScope PROD'
             echo "- Mode: $MODE"
+            echo "- Phase: $FRONT_DOOR_PHASE"
             echo "- Resource group: $AZURE_RESOURCE_GROUP"
-            echo "- Image tag: $IMAGE_TAG"
-            echo "- Front Door phase: $FRONT_DOOR_PHASE"
-            echo "- Front Door enabled: $ENABLE_FRONT_DOOR"
-            echo "- Image verification does not establish application health."
+            echo "- Image SHA: $IMAGE_TAG"
+            echo '- Finalize requires approved Front Door Private Link and Entra callback registration.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ============================================================
-      # STEP 12: Azure Logout
-      # ============================================================
-
-      - name: Azure Logout
+      - name: Azure logout
         if: always()
         shell: bash
         run: az logout || true

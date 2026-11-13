@@ -1,11 +1,10 @@
-
-name: Deploy TokenScope PROD Infrastructure
+name: Deploy TokenScope PROD Infrastructure - Staged
 
 on:
   workflow_dispatch:
     inputs:
       confirm_production:
-        description: 'Type DEPLOY-PROD to deploy infrastructure'
+        description: 'Type DEPLOY-PROD (only after approved infrastructure review)'
         type: string
         required: true
 
@@ -19,408 +18,257 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy PROD Azure Infrastructure
-
+    name: PROD infrastructure / ${{ github.sha }}
     runs-on: ubuntu-latest
-
     environment: prod
-
     timeout-minutes: 120
-
     env:
-      # ============================================================
-      # PROD AZURE CONFIGURATION
-      # ============================================================
+      # Set bootstrap for a fresh environment, then change to finalize and commit.
+      INFRA_STAGE: 'bootstrap'  # bootstrap | finalize
+      # For finalize: paste the EXACT SHA printed by the push-only image workflow.
+      APPROVED_IMAGE_SHA: ''
+      FRONT_DOOR_PHASE: 'off' # off | create | finalize; only with INFRA_STAGE=finalize
+      FRONT_DOOR_HOSTNAME: '' # endpoint FQDN from Bicep deployment output
+      FRONT_DOOR_INSTANCE_ID: '' # X-Azure-FDID from Bicep output
+      # Application metric alerts are deployed separately after app health checks.
+      DEPLOY_APP_ALERTS: 'false'
+      DEPLOY_MONITORING_ALERTS: 'false'
+      # PROD-only workaround for geo storage SKU unavailable in westeurope.
+      PROD_DISABLE_GEO_REDUNDANT_BACKUP: 'true'
 
       AZURE_RESOURCE_GROUP: rg-westeurope-t1-amd-prd-helios-002
-
       EXPECTED_SUBSCRIPTION: 3796cf20-cb96-4457-914f-397760fe5834
-
       AZURE_LOCATION: westeurope
-
       PARAM_FILE: infra/parameters/prod.bicepparam
-
       CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
 
-      # ============================================================
-      # AZURE FRONT DOOR - CONTROL DIRECTLY IN CODE
-      # ============================================================
-      #
-      # off:
-      #   Front Door disabled.
-      #
-      # create:
-      #   Create Front Door Premium.
-      #
-      # finalize:
-      #   Configure Front Door instance ID,
-      #   public URL, Entra callback and workers.
-      #
-      # Change this value when required.
-
-      FRONT_DOOR_PHASE: 'off'
-
-      # Fill these only during finalize.
-
-      FRONT_DOOR_HOSTNAME: ''
-
-      FRONT_DOOR_INSTANCE_ID: ''
-
-      # ============================================================
-      # PROD APPLICATION SECRETS
-      # ============================================================
-
       PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
-
       PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
-
       SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-
       HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
-
       INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
-
       OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
-
       OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
-
       OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
-
       ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
 
     steps:
-
-      # ============================================================
-      # STEP 1: CHECKOUT REPOSITORY
-      # ============================================================
-
-      - name: Checkout repository
+      - name: Checkout selected revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
 
-      # ============================================================
-      # STEP 2: AZURE LOGIN USING PROD OIDC
-      # ============================================================
-
-      - name: Azure Login using PROD OIDC
+      - name: Azure login (PROD OIDC)
         uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # ============================================================
-      # STEP 3: VALIDATE PROD TARGET
-      # ============================================================
-
-      - name: Validate PROD Target and Confirmation
+      - name: Validate PROD target and stage
         shell: bash
         env:
-          CONFIGURED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-          CONFIGURED_SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          CONFIGURED_LOCATION: ${{ vars.AZURE_LOCATION }}
+          GH_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          GH_SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          GH_LOCATION: ${{ vars.AZURE_LOCATION }}
         run: |
           set -euo pipefail
-
-          echo "Validating TokenScope PROD configuration..."
-
-          test -f infra/main.bicep || {
-            echo "::error::infra/main.bicep not found"
-            exit 1
+          test "$CONFIRM_PRODUCTION" = 'DEPLOY-PROD' || { echo '::error::Invalid PROD confirmation'; exit 1; }
+          test "$GH_RESOURCE_GROUP" = "$AZURE_RESOURCE_GROUP"
+          test "$GH_SUBSCRIPTION" = "$EXPECTED_SUBSCRIPTION"
+          test "$GH_LOCATION" = "$AZURE_LOCATION"
+          test "$(az account show --query id -o tsv)" = "$EXPECTED_SUBSCRIPTION"
+          test -f infra/main.bicep && test -f "$PARAM_FILE"
+          grep -q 'param deployContainerApp bool' infra/main.bicep || {
+            echo '::error::Install updated infra/main.bicep with deployContainerApp first'; exit 1;
           }
-
-          test -f "$PARAM_FILE" || {
-            echo "::error::PROD parameter file not found"
-            exit 1
-          }
-
-          test "$CONFIRM_PRODUCTION" = "DEPLOY-PROD" || {
-            echo "::error::Type DEPLOY-PROD to continue"
-            exit 1
-          }
-
-          test "$CONFIGURED_RESOURCE_GROUP" = "$AZURE_RESOURCE_GROUP" || {
-            echo "::error::Resource group mismatch"
-            exit 1
-          }
-
-          test "$CONFIGURED_SUBSCRIPTION" = "$EXPECTED_SUBSCRIPTION" || {
-            echo "::error::Subscription mismatch"
-            exit 1
-          }
-
-          test "$CONFIGURED_LOCATION" = "$AZURE_LOCATION" || {
-            echo "::error::Location mismatch"
-            exit 1
-          }
-
-          ACTUAL_SUB="$(az account show --query id -o tsv)"
-
-          test "$ACTUAL_SUB" = "$EXPECTED_SUBSCRIPTION" || {
-            echo "::error::Wrong Azure subscription: $ACTUAL_SUB"
-            exit 1
-          }
-
-          az group show \
-            --name "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-          echo "SUCCESS: PROD subscription and resource group verified"
-
-      # ============================================================
-      # STEP 4: VALIDATE REQUIRED SECRETS
-      # ============================================================
-
-      - name: Validate PROD Secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          for name in \
-            PG_ADMIN_LOGIN \
-            PG_ADMIN_PASSWORD \
-            SESSION_SECRET \
-            HMAC_SESSION_KEY \
-            INTERNAL_WORKER_HMAC_KEY \
-            OIDC_SESSION_SECRET \
-            OIDC_AUTH_SESSION_SECRET \
-            OIDC_TOKEN_KEY \
-            ENTRA_CLIENT_SECRET
-          do
-            test -n "${!name:-}" || {
-              echo "::error::Missing PROD secret: $name"
-              exit 1
-            }
+          case "$INFRA_STAGE" in bootstrap|finalize) ;; *) echo '::error::Unknown stage'; exit 1 ;; esac
+          case "$FRONT_DOOR_PHASE" in off|create|finalize) ;; *) echo '::error::Unknown Front Door phase'; exit 1 ;; esac
+          if [ "$INFRA_STAGE" = bootstrap ] && [ "$FRONT_DOOR_PHASE" != off ]; then
+            echo '::error::Bootstrap must keep Front Door off'; exit 1
+          fi
+          for key in PG_ADMIN_LOGIN PG_ADMIN_PASSWORD SESSION_SECRET HMAC_SESSION_KEY INTERNAL_WORKER_HMAC_KEY OIDC_SESSION_SECRET OIDC_AUTH_SESSION_SECRET OIDC_TOKEN_KEY ENTRA_CLIENT_SECRET; do
+            test -n "${!key:-}" || { echo "::error::Missing secret $key"; exit 1; }
           done
+          python3 - <<'PYVALID'
+          import os,base64,binascii
+          try: raw=base64.b64decode(os.environ['OIDC_TOKEN_KEY'],validate=True)
+          except (binascii.Error,ValueError): raise SystemExit('Invalid OIDC_TOKEN_KEY')
+          if len(raw)!=32: raise SystemExit('OIDC_TOKEN_KEY must decode to 32 bytes')
+          PYVALID
+          az group show --name "$AZURE_RESOURCE_GROUP" -o none
+          if [ "$INFRA_STAGE" = finalize ]; then
+            [[ "$APPROVED_IMAGE_SHA" =~ ^[a-fA-F0-9]{40}$ ]] || { echo '::error::Set APPROVED_IMAGE_SHA to the pushed image commit SHA'; exit 1; }
+          fi
+          if [ "$INFRA_STAGE" = bootstrap ]; then
+            # Refuse accidental re-bootstrap once the PROD app exists.
+            count="$(az containerapp list -g "$AZURE_RESOURCE_GROUP" --query "length(@)" -o tsv)"
+            [ "$count" = 0 ] || { echo '::error::Container Apps already exist; bootstrap blocked'; exit 1; }
+          fi
+          echo "Commit: $GITHUB_SHA | stage: $INFRA_STAGE | Front Door: $FRONT_DOOR_PHASE"
 
-          python3 - <<'PY'
-          import os
-          import base64
-          import binascii
-
-          try:
-              data = base64.b64decode(
-                  os.environ["OIDC_TOKEN_KEY"],
-                  validate=True
-              )
-          except (ValueError, binascii.Error):
-              raise SystemExit("Invalid OIDC_TOKEN_KEY Base64")
-
-          if len(data) != 32:
-              raise SystemExit(
-                  "OIDC_TOKEN_KEY must decode to 32 bytes"
-              )
-
-          print("SUCCESS: PROD secrets validated")
-          PY
-
-      # ============================================================
-      # STEP 5: PREPARE FRONT DOOR PARAMETERS
-      # ============================================================
-
-      - name: Prepare Azure Front Door Parameters
+      - name: Prepare Bicep phase variables
         shell: bash
         run: |
           set -euo pipefail
-
+          if [ "$INFRA_STAGE" = bootstrap ]; then
+            echo 'DEPLOY_CONTAINER_APP=false' >> "$GITHUB_ENV"
+            echo "IMAGE_TO_DEPLOY=$GITHUB_SHA" >> "$GITHUB_ENV"
+          else
+            echo 'DEPLOY_CONTAINER_APP=true' >> "$GITHUB_ENV"
+            echo "IMAGE_TO_DEPLOY=$APPROVED_IMAGE_SHA" >> "$GITHUB_ENV"
+          fi
           case "$FRONT_DOOR_PHASE" in
-
             off)
-              echo "ENABLE_FRONT_DOOR=false" >> "$GITHUB_ENV"
-              echo "FRONT_DOOR_ID=" >> "$GITHUB_ENV"
-              echo "APP_PUBLIC_ORIGIN=" >> "$GITHUB_ENV"
-              echo "ENTRA_REDIRECT_URI=" >> "$GITHUB_ENV"
-              echo "WORKER_BASE_URL=" >> "$GITHUB_ENV"
-
-              echo "Front Door disabled."
+              echo 'ENABLE_FRONT_DOOR=false' >> "$GITHUB_ENV"
+              echo 'FRONT_DOOR_ID=' >> "$GITHUB_ENV"
+              echo 'APP_PUBLIC_ORIGIN=' >> "$GITHUB_ENV"
+              echo 'ENTRA_REDIRECT_URI=' >> "$GITHUB_ENV"
+              echo 'WORKER_BASE_URL=' >> "$GITHUB_ENV"
               ;;
-
             create)
-              echo "ENABLE_FRONT_DOOR=true" >> "$GITHUB_ENV"
-              echo "FRONT_DOOR_ID=" >> "$GITHUB_ENV"
-              echo "APP_PUBLIC_ORIGIN=" >> "$GITHUB_ENV"
-              echo "ENTRA_REDIRECT_URI=" >> "$GITHUB_ENV"
-              echo "WORKER_BASE_URL=" >> "$GITHUB_ENV"
-
-              echo "Front Door creation enabled."
+              echo 'ENABLE_FRONT_DOOR=true' >> "$GITHUB_ENV"
+              echo 'FRONT_DOOR_ID=' >> "$GITHUB_ENV"
+              echo 'APP_PUBLIC_ORIGIN=' >> "$GITHUB_ENV"
+              echo 'ENTRA_REDIRECT_URI=' >> "$GITHUB_ENV"
+              echo 'WORKER_BASE_URL=' >> "$GITHUB_ENV"
               ;;
-
             finalize)
-              [[ "$FRONT_DOOR_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]] || {
-                echo "::error::Invalid Front Door hostname"
-                exit 1
-              }
-
-              [[ "$FRONT_DOOR_INSTANCE_ID" =~ ^[a-fA-F0-9-]{36}$ ]] || {
-                echo "::error::Invalid Front Door instance ID"
-                exit 1
-              }
-
-              echo "ENABLE_FRONT_DOOR=true" >> "$GITHUB_ENV"
-
+              [[ "$FRONT_DOOR_HOSTNAME" =~ ^[A-Za-z0-9.-]+\.azurefd\.net$ ]] || { echo '::error::Invalid Front Door hostname'; exit 1; }
+              [[ "$FRONT_DOOR_INSTANCE_ID" =~ ^[A-Fa-f0-9-]{36}$ ]] || { echo '::error::Invalid Front Door ID'; exit 1; }
+              echo 'ENABLE_FRONT_DOOR=true' >> "$GITHUB_ENV"
               echo "FRONT_DOOR_ID=$FRONT_DOOR_INSTANCE_ID" >> "$GITHUB_ENV"
-
               echo "APP_PUBLIC_ORIGIN=https://$FRONT_DOOR_HOSTNAME" >> "$GITHUB_ENV"
-
               echo "ENTRA_REDIRECT_URI=https://$FRONT_DOOR_HOSTNAME/auth/entra/callback" >> "$GITHUB_ENV"
-
               echo "WORKER_BASE_URL=https://$FRONT_DOOR_HOSTNAME" >> "$GITHUB_ENV"
-
-              echo "Front Door finalization enabled."
               ;;
-
-            *)
-              echo "::error::Invalid Front Door phase"
-              exit 1
-              ;;
-
           esac
 
-      # ============================================================
-      # STEP 6: VALIDATE BICEP FILES
-      # ============================================================
-
-      - name: Validate PROD Bicep
+      - name: Prepare isolated PROD Bicep overrides
         shell: bash
         run: |
           set -euo pipefail
+          export PROD_INFRA="$RUNNER_TEMP/tokenscope-prod-infra"
+          mkdir -p "$PROD_INFRA"
+          cp -a infra/. "$PROD_INFRA/"
 
-          echo "Compiling PROD Bicep templates..."
+          python3 - <<'PYPATCH'
+          import os
+          from pathlib import Path
 
-          az bicep build \
-            --file infra/main.bicep \
-            --stdout > /dev/null
+          root = Path(os.environ['PROD_INFRA'])
+          pg = root / 'modules/postgresql.bicep'
+          main = root / 'main.bicep'
+          pg_source = pg.read_text(encoding='utf-8')
+          old = "geoRedundantBackup: environment == 'production' ? 'Enabled' : 'Disabled'"
+          new = "geoRedundantBackup: 'Disabled'"
+          if os.environ['PROD_DISABLE_GEO_REDUNDANT_BACKUP'] == 'true':
+              if pg_source.count(old) != 1:
+                  raise SystemExit('PostgreSQL module changed; exact geo backup override missing. Refusing deploy.')
+              pg.write_text(pg_source.replace(old, new, 1), encoding='utf-8')
+              print('PROD temporary PostgreSQL: geo backup disabled; 35-day retention and HA unchanged')
 
-          az bicep build-params \
-            --file "$PARAM_FILE" \
-            --stdout > /dev/null
+          main_source = main.read_text(encoding='utf-8')
+          # Ops alerts depend on deployed app and jobs. Keep them out of first app release.
+          alert_condition = "module opsAlerts 'modules/ops-alerts.bicep' = if (deployContainerApp) {"
+          if os.environ['DEPLOY_APP_ALERTS'] == 'false':
+              if main_source.count(alert_condition) != 1:
+                  raise SystemExit('Cannot safely locate opsAlerts gate in main.bicep; refusing deploy.')
+              main.write_text(main_source.replace(
+                  alert_condition,
+                  "module opsAlerts 'modules/ops-alerts.bicep' = if (deployContainerApp && false) {",
+                  1
+              ), encoding='utf-8')
+              print('PROD temporary main.bicep: ops-alerts excluded from core deployment')
+          # PROD-only: skip 4 app metric alerts in temporary monitoring copy.
+          # Preserve LAW, App Insights, DCE, DCR, monitoring RBAC and action group.
+          monitoring = root / 'modules/monitoring.bicep'
+          monitor_source = monitoring.read_text(encoding='utf-8')
+          if os.environ['DEPLOY_MONITORING_ALERTS'] == 'false':
+              for name in ('errorRateAlert', 'responseTimeAlert',
+                           'exceptionRateAlert', 'dependencyFailureAlert'):
+                  before = f"resource {name} 'Microsoft.Insights/metricAlerts@2018-03-01' = {{"
+                  after = f"resource {name} 'Microsoft.Insights/metricAlerts@2018-03-01' = if (false) {{"
+                  if monitor_source.count(before) != 1:
+                      raise SystemExit(f'Cannot safely locate optional metric alert: {name}')
+                  monitor_source = monitor_source.replace(before, after, 1)
+              monitoring.write_text(monitor_source, encoding='utf-8')
+              print('PROD temp monitoring: four optional metric alerts skipped')
+          elif os.environ['DEPLOY_MONITORING_ALERTS'] != 'true':
+              raise SystemExit('DEPLOY_MONITORING_ALERTS must be true or false')
+          PYPATCH
 
-          echo "SUCCESS: PROD Bicep compilation completed"
+          # Azure CLI cannot mix .bicepparam file with inline overrides.
+          # Write effective values into TEMPORARY PROD parameters only.
+          export PROD_INFRA DEPLOY_CONTAINER_APP IMAGE_TO_DEPLOY
+          export ENABLE_FRONT_DOOR FRONT_DOOR_ID APP_PUBLIC_ORIGIN
+          export ENTRA_REDIRECT_URI WORKER_BASE_URL
+          python3 - <<'PYPARAM'
+          import json, os, re
+          from pathlib import Path
+          path = Path(os.environ['PROD_INFRA']) / 'parameters/prod.bicepparam'
+          source = path.read_text(encoding='utf-8')
+          settings = {
+              'deployContainerApp': os.environ['DEPLOY_CONTAINER_APP'] == 'true',
+              'imageTag': os.environ['IMAGE_TO_DEPLOY'],
+              'gitCommitSha': os.environ['IMAGE_TO_DEPLOY'],
+              'enableFrontDoor': os.environ['ENABLE_FRONT_DOOR'] == 'true',
+              'frontDoorId': os.environ['FRONT_DOOR_ID'],
+              'appPublicOrigin': os.environ['APP_PUBLIC_ORIGIN'],
+              'entraIdRedirectUri': os.environ['ENTRA_REDIRECT_URI'],
+              'workerBaseUrl': os.environ['WORKER_BASE_URL'],
+          }
+          for name, value in settings.items():
+              literal = str(value).lower() if isinstance(value, bool) else json.dumps(value)
+              # JSON double-quoted strings aren't valid Bicep; single quote
+              # escaping is required and values are known deployment controls.
+              if not isinstance(value, bool):
+                  literal = "'" + value.replace("'", "''") + "'"
+              pattern = rf'^param {re.escape(name)}\s*=.*$'
+              source, count = re.subn(pattern, lambda _m: f'param {name} = {literal}', source, flags=re.M)
+              if count > 1:
+                  raise SystemExit(f'Duplicate parameter in temporary PROD file: {name}')
+              if count == 0:
+                  source += f'\nparam {name} = {literal}\n'
+          path.write_text(source, encoding='utf-8')
+          print('Effective PROD deployment controls written into temporary bicepparam')
+          PYPARAM
 
-      # ============================================================
-      # STEP 7: VALIDATE ARM DEPLOYMENT
-      # ============================================================
+          echo "PROD_PARAM_FILE=$PROD_INFRA/parameters/prod.bicepparam" >> "$GITHUB_ENV"
+          echo "PROD_MAIN_FILE=$PROD_INFRA/main.bicep" >> "$GITHUB_ENV"
 
-      - name: Validate PROD ARM Deployment
+      - name: Compile Bicep and validate ARM
         shell: bash
         run: |
           set -euo pipefail
-
+          az bicep build --file "$PROD_MAIN_FILE" --stdout >/dev/null
+          az bicep build-params --file "$PROD_PARAM_FILE" --stdout >/dev/null
           az deployment group validate \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" \
-              enableFrontDoor="$ENABLE_FRONT_DOOR" \
-              frontDoorId="$FRONT_DOOR_ID" \
-              appPublicOrigin="$APP_PUBLIC_ORIGIN" \
-              entraIdRedirectUri="$ENTRA_REDIRECT_URI" \
-              workerBaseUrl="$WORKER_BASE_URL" \
-            --only-show-errors \
-            --output none
+            -g "$AZURE_RESOURCE_GROUP" \
+            --parameters "$PROD_PARAM_FILE" \
+            --only-show-errors -o none
 
-          echo "SUCCESS: PROD ARM validation completed"
-
-      # ============================================================
-      # STEP 8: DEPLOY PROD INFRASTRUCTURE DIRECTLY
-      #
-      # NO WHAT-IF STEP.
-      #
-      # Requires explicit production confirmation and
-      # GitHub Environment approval where configured.
-      # ============================================================
-
-      - name: Deploy PROD Infrastructure
+      - name: Deploy Azure infrastructure (no automatic What-If)
         shell: bash
         run: |
           set -euo pipefail
-
-          DEPLOYMENT_NAME="tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-          echo "Deploying TokenScope PROD infrastructure..."
-
+          deployment="tokenscope-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           az deployment group create \
-            --name "$DEPLOYMENT_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --parameters "$PARAM_FILE" \
-              enableFrontDoor="$ENABLE_FRONT_DOOR" \
-              frontDoorId="$FRONT_DOOR_ID" \
-              appPublicOrigin="$APP_PUBLIC_ORIGIN" \
-              entraIdRedirectUri="$ENTRA_REDIRECT_URI" \
-              workerBaseUrl="$WORKER_BASE_URL" \
-            --mode Incremental \
-            --only-show-errors \
-            --output none
+            -g "$AZURE_RESOURCE_GROUP" -n "$deployment" \
+            --parameters "$PROD_PARAM_FILE" \
+            --mode Incremental --only-show-errors -o none
+          echo "DEPLOYMENT_NAME=$deployment" >> "$GITHUB_ENV"
 
-          echo "DEPLOYMENT_NAME=$DEPLOYMENT_NAME" >> "$GITHUB_ENV"
-
-          echo "SUCCESS: PROD infrastructure deployment completed"
-
-      # ============================================================
-      # STEP 9: SHOW DEPLOYMENT OUTPUTS
-      # ============================================================
-
-      - name: Show PROD Deployment Outputs
+      - name: Show created resource names and Front Door outputs
         shell: bash
         run: |
           set -euo pipefail
+          az deployment group show -g "$AZURE_RESOURCE_GROUP" -n "$DEPLOYMENT_NAME" \
+            --query 'properties.outputs.{acr:acrLoginServer.value,app:containerAppName.value,appFqdn:containerAppUrl.value,frontDoorFqdn:frontDoorEndpointFqdn.value,frontDoorId:frontDoorInstanceId.value}' \
+            -o json
+          echo "Infrastructure stage $INFRA_STAGE completed; application readiness is separate."
+          echo "Monitoring alerts gate: $DEPLOY_MONITORING_ALERTS; ops alerts gate: $DEPLOY_APP_ALERTS"
 
-          az deployment group show \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$DEPLOYMENT_NAME" \
-            --query properties.outputs \
-            --output json > deployment-outputs.json
-
-          python3 - <<'PY'
-          import json
-
-          with open(
-              "deployment-outputs.json",
-              encoding="utf-8"
-          ) as f:
-              outputs = json.load(f)
-
-          for key in (
-              "acrLoginServer",
-              "containerAppName",
-              "containerAppUrl",
-              "keyVaultName",
-              "postgresqlServerName",
-              "frontDoorEndpointFqdn",
-              "frontDoorInstanceId",
-              "frontDoorPrivateLinkRequestMessage"
-          ):
-              value = outputs.get(key, {}).get("value", "")
-
-              if value:
-                  print(f"{key}: {value}")
-          PY
-
-      # ============================================================
-      # STEP 10: SUMMARY
-      # ============================================================
-
-      - name: PROD Deployment Summary
+      - name: Azure logout
         if: always()
-        shell: bash
-        run: |
-          {
-            echo "## TokenScope PROD Infrastructure"
-            echo ""
-            echo "- Resource group: $AZURE_RESOURCE_GROUP"
-            echo "- Subscription: $EXPECTED_SUBSCRIPTION"
-            echo "- Region: $AZURE_LOCATION"
-            echo "- Front Door phase: $FRONT_DOOR_PHASE"
-            echo ""
-            echo "Infrastructure deploy completed only if the apply step succeeded."
-            echo "Verify Container App health before image release."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ============================================================
-      # STEP 11: LOGOUT
-      # ============================================================
-
-      - name: Azure Logout
-        if: always()
-        shell: bash
-        run: |
-          az logout || true
+        run: az logout || true

@@ -1,289 +1,65 @@
-// ── TokenScope — VNet-integrated TEST parameters ─────────────────────────
+// TokenScope — PROD parameter template
+// Based on the supplied TEST and PROD configurations.
+// Do NOT deploy until the PROD network/IPAM allocation, generated resource names,
+// and main.bicep env values have been confirmed using validation and What-If.
 
 using '../main.bicep'
 
-// ── Environment ──────────────────────────────────────────────────────────
-// env='dev' selects the DEV-sized TokenScope profile.
-//
-// TEST isolation comes from:
-// - GitHub Environment: test
-// - Separate TEST Resource Group
-// - Parameter file: test.bicepparam
-// - Unique projectName: tokenscopeigdctest
-// - Separate TEST deployment identity
-// - Separate TEST VNet
-// - Separate TEST ACR
-// - Separate TEST Container Apps environment
-// - Separate TEST Front Door
-// - Separate TEST private runner
-
-param env = 'dev'
+// main.bicep previously accepted 'production' (not 'prod').
+// IMPORTANT: Confirm current main.bicep allowed values AND name generation
+// before running deployment. Changing env can change resource names.
+param env = 'production'
 param location = 'westeurope'
-param projectName = 'tokenscopeigdctest'
+param projectName = 'tokenscopeigdcprod'
 
-// Initial bootstrap uses latest.
-// After the image workflow succeeds, the Container App should be updated
-// using the immutable Git commit SHA.
-
+// Bootstrap image. For ongoing image releases, prefer a separately approved
+// commit-SHA image deployment using prod-image-deploy.yml.
 param imageTag = 'latest'
-
 param deployRbac = true
 
-// ── Required secrets ─────────────────────────────────────────────────────
-// Values come from:
-//
-// GitHub Repository
-// → Settings
-// → Environments
-// → test
-// → Environment secrets
-
+// Credentials supplied by the GitHub Environment named prod.
 param pgAdminLogin = readEnvironmentVariable('PG_ADMIN_LOGIN')
 param pgAdminPassword = readEnvironmentVariable('PG_ADMIN_PASSWORD')
-
 param sessionSecret = readEnvironmentVariable('SESSION_SECRET')
 param hmacSessionKey = readEnvironmentVariable('HMAC_SESSION_KEY')
 param internalWorkerHmacKey = readEnvironmentVariable('INTERNAL_WORKER_HMAC_KEY')
-
 param oidcSessionSecret = readEnvironmentVariable('OIDC_SESSION_SECRET')
 param oidcAuthSessionSecret = readEnvironmentVariable('OIDC_AUTH_SESSION_SECRET')
 param oidcTokenKey = readEnvironmentVariable('OIDC_TOKEN_KEY')
-
-// IMPORTANT:
-// ENTRA_CLIENT_SECRET must be the SECRET VALUE belonging to the Entra
-// App Registration specified by entraIdClientId.
-//
-// Do NOT use:
-// - Secret ID
-// - GitHub deployment identity secret
-// - Secret from another Entra application
-
 param entraIdClientSecret = readEnvironmentVariable('ENTRA_CLIENT_SECRET')
 
-// ── Optional provider credentials ────────────────────────────────────────
-
-param anthropicApiKey = readEnvironmentVariable(
-  'ANTHROPIC_API_KEY',
-  ''
-)
-
-param githubPatPartnerDemo = readEnvironmentVariable(
-  'GH_PAT_PARTNER_DEMO',
-  readEnvironmentVariable('GITHUB_PAT_PARTNER_DEMO', '')
-)
-
-param githubPatProduction = readEnvironmentVariable(
-  'GH_PAT_PRODUCTION',
-  readEnvironmentVariable('GITHUB_PAT_PRODUCTION', '')
-)
-
-param githubPatApacNfr = readEnvironmentVariable(
-  'GH_PAT_ENTERPRISE_NFR',
-  readEnvironmentVariable('GITHUB_PAT_APAC_NFR', '')
-)
-
-param githubAppKeyPartnerDemo = readEnvironmentVariable(
-  'GH_APP_KEY_PARTNER_DEMO',
-  readEnvironmentVariable('GITHUB_APP_KEY_PARTNER_DEMO', '')
-)
-
-// ── Public entry point ───────────────────────────────────────────────────
-//
-// FIRST TEST DEPLOYMENT:
-//
-// There is no TEST Front Door endpoint yet.
-// Keep this empty.
-//
-// After Front Door is created, this will become:
-//
-// https://<TEST-FRONT-DOOR-HOSTNAME>
-
-param appPublicOrigin = 'https://ep-tokenscopeigdctest-dev-weu-ehhfe9fndedtftbx.a03.azurefd.net'
-
-// ── Microsoft Entra ID authentication ───────────────────────────────────
-//
-// This is the TokenScope HUMAN USER sign-in application.
-//
-// IMPORTANT:
-// This is NOT tokenscope-github-test-deployer.
-//
-// tokenscope-github-test-deployer
-//     → GitHub Actions → Azure deployment
-//
-// entraIdClientId below
-//     → Human users → Microsoft login → TokenScope
-
+// Human user sign-in application (not GitHub deployment identity).
+// Confirm the client/tenant and authorized redirect URI for PROD.
 param entraIdClientId = '1d51bb60-1d9b-4d5b-8bbb-6096d583d4af'
-
 param entraIdTenantId = '6c637512-c417-4e78-9d62-b61258e4b619'
-
-// FIRST TEST DEPLOYMENT:
-//
-// Keep empty until TEST Front Door exists.
-//
-// Final value will become:
-//
-// https://<TEST-FRONT-DOOR-HOSTNAME>/auth/entra/callback
-
-param entraIdRedirectUri = 'https://ep-tokenscopeigdctest-dev-weu-ehhfe9fndedtftbx.a03.azurefd.net/auth/entra/callback'
-
 param bootstrapAdminEmail = 'manideep.muddagowni@insight.com'
-
 param allowPersonaOverride = false
 
-// ── Scheduled workers ────────────────────────────────────────────────────
-//
-// FIRST TEST DEPLOYMENT:
-//
-// Keep empty because TEST Front Door does not exist yet.
-//
-// Final value:
-//
-// https://<TEST-FRONT-DOOR-HOSTNAME>
+// Supply production hostnames and callbacks from GitHub Environment secrets/vars.
+// These are intentionally declared ONCE (duplicates removed).
+param appPublicOrigin = readEnvironmentVariable('APP_PUBLIC_ORIGIN', '')
+param entraIdRedirectUri = readEnvironmentVariable('ENTRA_REDIRECT_URI', '')
+param workerBaseUrl = readEnvironmentVariable('WORKER_BASE_URL', '')
 
-param workerBaseUrl = 'https://ep-tokenscopeigdctest-dev-weu-ehhfe9fndedtftbx.a03.azurefd.net'
-
-// ── Private networking ───────────────────────────────────────────────────
-
+// Private network settings.
+// BLOCKER: CIDRs below are copied from the supplied PROD file and overlap the
+// existing TEST CIDRs. Replace ONLY after network/IPAM approval for a NEW VNet.
+// If a PROD VNet already exists, do not alter its address space casually.
 param enablePrivateNetworking = true
-
-// Empty means the template generates the VNet name from:
-// projectName + env/profile + region.
-
-param vnetName = ''
-
-// ── TEST VNet Addressing ─────────────────────────────────────────────────
-//
-// IMPORTANT:
-//
-// These must NOT overlap with DEV or DEMO if environments may eventually
-// communicate through hub/spoke networking.
-//
-// Example:
-//
-// DEV  = 10.0.0.0/24
-// DEMO = 10.0.1.0/24
-//
-// Below uses 10.0.2.0/24 as the TEST example.
-//
-// Confirm this range with your network/IPAM team before production use.
-
-param vnetAddressSpace = '10.0.2.0/24'
-
-// Container Apps infrastructure subnet
-
-param containerAppsSubnetPrefix = '10.0.2.0/27'
-
-// Private Endpoints subnet
-
-param privateEndpointsSubnetPrefix = '10.0.2.32/28'
-
-// Azure Monitor Private Link / AMPLS subnet
-
-param amplsSubnetPrefix = '10.0.2.48/28'
-
-// ── GitHub private runner subnet ─────────────────────────────────────────
-//
-// Dedicated subnet for:
-//
-// vm-tokenscope-test-github-runner
-//
-// Mirrors the successful DEV runner design.
-//
-// 10.0.2.64/27 provides a separate runner subnet.
-
-param buildSubnetPrefix = '10.0.2.64/27'
-
-// Create/link supported Azure Private DNS zone groups.
-
+param vnetName = 'vnet-tokenscopeigdc-prod-weu'
+param vnetAddressSpace = '10.0.2.0/24' // UNAPPROVED: clashes with TEST
+param containerAppsSubnetPrefix = '10.0.2.0/27' // UNAPPROVED
+param privateEndpointsSubnetPrefix = '10.0.2.32/28' // UNAPPROVED
+param amplsSubnetPrefix = '10.0.2.48/28' // UNAPPROVED
+param buildSubnetPrefix = '10.0.2.64/27' // UNAPPROVED
 param registerDnsZoneGroups = true
-
-// Keep Azure Monitor query access public initially.
-//
-// Switch to private-only only after AMPLS and all required Azure Monitor
-// Private DNS configuration has been validated.
-
 param monitorQueryPrivateOnly = false
 
-// ── Optional landing-zone networking ────────────────────────────────────
-//
-// Uncomment only if the customer provides these shared resources
-// and the TEST deployment identity has permission to use them.
-
-// param natGatewayId = '/subscriptions/<subscription-id>/resourceGroups/<network-resource-group>/providers/Microsoft.Network/natGateways/<nat-gateway>'
-
-// param subnetRouteTableId = '/subscriptions/<subscription-id>/resourceGroups/<network-resource-group>/providers/Microsoft.Network/routeTables/<route-table>'
-
-// param subnetNetworkSecurityGroupId = '/subscriptions/<subscription-id>/resourceGroups/<network-resource-group>/providers/Microsoft.Network/networkSecurityGroups/<nsg>'
-
-// ── Optional hub connectivity ────────────────────────────────────────────
-//
-// Uncomment only when TEST must connect to an approved hub VNet.
-
-// param hubVnetId = '/subscriptions/<subscription-id>/resourceGroups/<hub-resource-group>/providers/Microsoft.Network/virtualNetworks/<hub-vnet>'
-
-// param useRemoteGateways = true
-
-// ── Azure Front Door Premium ─────────────────────────────────────────────
-//
-// VERY IMPORTANT:
-//
-// FIRST TEST DEPLOYMENT:
-//
-// Front Door MUST remain disabled.
-//
-// Deployment sequence:
-//
-// 1. Deploy private infrastructure.
-// 2. Create TEST ACR.
-// 3. Assign AcrPush/AcrPull.
-// 4. Create TEST private runner.
-// 5. Push TokenScope image.
-// 6. Confirm Container App is Healthy.
-// 7. Enable Front Door.
-// 8. Deploy again.
-// 9. Approve Front Door Private Link.
-// 10. Obtain TEST Front Door URL and ID.
-// 11. Update this file.
-// 12. Add TEST Entra callback.
-// 13. Run final TEST deployment.
-
-param enableFrontDoor = true
-
+// First PROD deployment: Front Door disabled until private app and its
+// revision are healthy; handle Front Door in a later approved deployment.
+param enableFrontDoor = false
 param frontDoorSku = 'Premium'
-
-// Empty during the first Front Door deployment.
-//
-// After Front Door is created:
-//
-// param frontDoorId = '<TEST-FRONT-DOOR-ID>'
-
-param frontDoorId = '8e4c240f-1a81-4462-a254-cbcf6b150b8e'
-
-// Keep WAF managed rules in Log during initial TEST validation.
-//
-// Move to Block only after testing legitimate application traffic
-// and obtaining the required security approval.
-
+param frontDoorId = readEnvironmentVariable('FRONT_DOOR_ID', '')
 param frontDoorWafManagedRuleAction = 'Log'
-
-// ── Monitoring ───────────────────────────────────────────────────────────
-
-// Uncomment only when Microsoft.Monitor cannot be registered
-// or customer policy explicitly requires disabling it.
-
-// param deployAzureMonitorWorkspace = false
-
-// Optional TEST alert destination.
-
-// param alertNotificationEmail = '<TEST-ALERT-EMAIL>'
-
-// Optional Anthropic reconciliation endpoint.
-//
-// Requires ANTHROPIC_API_KEY in GitHub TEST Environment Secrets.
-
-// param anthropicApiEndpoint = 'https://api.anthropic.com'
-
-// ── Key Vault recovery ───────────────────────────────────────────────────
 
 param keyVaultCreateMode = 'default'

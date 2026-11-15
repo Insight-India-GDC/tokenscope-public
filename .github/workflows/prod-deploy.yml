@@ -94,6 +94,13 @@ jobs:
 
       RUNNER_SUBNET_EXPECTED_NSG: 'nsg-tokenscope-prod-github-runner'
 
+      # Old, unused subnets that the deployment may remove.
+      # Space-separated. Each one is checked in Azure first:
+      # the run stops if it still has any NIC, private endpoint,
+      # service link or delegation in use.
+
+      ALLOWED_SUBNET_REMOVALS: 'snet-build'
+
       # ============================================================
       # PROD APPLICATION SECRETS
       # ============================================================
@@ -766,6 +773,45 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ------------------------------------------------
+          # Check which allowed subnets are really empty.
+          # ------------------------------------------------
+
+          SAFE_REMOVALS=""
+
+          for SUBNET in $ALLOWED_SUBNET_REMOVALS; do
+            if ! SUBNET_JSON="$(az network vnet subnet show \
+                -g "$AZURE_RESOURCE_GROUP" \
+                --vnet-name "$VNET_NAME" \
+                -n "$SUBNET" -o json 2>/dev/null)"; then
+              echo "Allowed removal $SUBNET does not exist. Nothing to check."
+              continue
+            fi
+
+            IN_USE="$(jq '
+              ((.ipConfigurations // []) | length)
+              + ((.privateEndpoints // []) | length)
+              + ((.serviceAssociationLinks // []) | length)
+              + ((.resourceNavigationLinks // []) | length)
+              + ((.ipConfigurationProfiles // []) | length)
+            ' <<< "$SUBNET_JSON")"
+
+            PREFIX="$(jq -r '.addressPrefix // .addressPrefixes[0] // ""' <<< "$SUBNET_JSON")"
+
+            if [ "$IN_USE" = "0" ]; then
+              echo "Subnet $SUBNET ($PREFIX) is empty. Removal allowed."
+              SAFE_REMOVALS="$SAFE_REMOVALS $SUBNET"
+            else
+              echo "::error::Subnet $SUBNET ($PREFIX) is still in use ($IN_USE attachments). Not removing it."
+            fi
+          done
+
+          export SAFE_REMOVALS
+
+          # ------------------------------------------------
+          # What-if preview.
+          # ------------------------------------------------
+
           az deployment group what-if \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --parameters "$PROD_PARAM_FILE" \
@@ -775,18 +821,26 @@ jobs:
 
           python3 - <<'PY'
           import json
+          import os
+
+          safe = set(os.environ.get("SAFE_REMOVALS", "").split())
 
           with open("whatif.json", encoding="utf-8") as f:
               data = json.load(f)
 
           problems = []
+          allowed = []
 
           for change in data.get("changes", []):
               rid = change.get("resourceId", "")
               kind = change.get("changeType", "")
 
               if kind == "Delete":
-                  problems.append(f"Delete: {rid}")
+                  name = rid.rsplit("/", 1)[-1]
+                  if "/subnets/" in rid and name in safe:
+                      allowed.append(name)
+                  else:
+                      problems.append(f"Delete: {rid}")
 
               if "/virtualNetworks/" in rid and "/subnets/" not in rid:
                   before = (change.get("before") or {}).get("properties", {})
@@ -796,14 +850,20 @@ jobs:
                   new = {s.get("name") for s in after.get("subnets", [])}
 
                   for name in sorted(old - new):
-                      problems.append(f"Subnet would be removed: {name}")
+                      if name in safe:
+                          allowed.append(name)
+                      else:
+                          problems.append(f"Subnet would be removed: {name}")
+
+          for name in sorted(set(allowed)):
+              print(f"::notice::Empty subnet {name} will be removed (approved).")
 
           if problems:
               for p in problems:
                   print("::error::" + p)
-              raise SystemExit("Deployment stopped: deletions detected.")
+              raise SystemExit("Deployment stopped: unapproved deletions detected.")
 
-          print("SUCCESS: No subnet removals or resource deletions.")
+          print("SUCCESS: No unapproved subnet removals or resource deletions.")
           PY
 
       # ============================================================

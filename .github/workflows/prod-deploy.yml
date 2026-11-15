@@ -49,17 +49,10 @@ jobs:
       # AZURE FRONT DOOR - CONTROL DIRECTLY IN CODE
       # ============================================================
       #
-      # off:
-      #   Front Door disabled.
-      #
-      # create:
-      #   Create Front Door Premium.
-      #
-      # finalize:
-      #   Configure Front Door instance ID,
-      #   public URL, Entra callback and workers.
-      #
-      # Change this value when required.
+      # off:      Front Door disabled.
+      # create:   Create Front Door Premium.
+      # finalize: Configure Front Door instance ID, public URL,
+      #           Entra callback and workers.
 
       FRONT_DOOR_PHASE: 'off'
 
@@ -73,18 +66,8 @@ jobs:
       # PROD-ONLY POSTGRESQL AND ALERT SETTINGS
       # ============================================================
       #
-      # Both changes apply ONLY to a temporary copy
-      # during this GitHub Actions run.
-      #
+      # Applied ONLY to a temporary copy during this run.
       # Original Bicep files are not changed.
-      #
-      # PostgreSQL:
-      # Fix GeoZoneRedundantStorageAccountSkusNotFound.
-      #
-      # Monitoring:
-      # Skip optional alert resources during this deployment.
-      # Retain Log Analytics, App Insights, DCE, DCR,
-      # managed identity RBAC and diagnostic settings.
 
       PROD_DISABLE_GEO_REDUNDANT_BACKUP: 'true'
 
@@ -94,6 +77,21 @@ jobs:
       DEPLOY_MONITORING_ALERTS: 'false'
 
       DEPLOY_APP_ALERTS: 'false'
+
+      # ============================================================
+      # EXISTING RUNNER SUBNET (created outside Bicep)
+      # ============================================================
+      #
+      # Declared in the temporary template so Bicep does not try
+      # to delete it (InUseSubnetCannotBeDeleted).
+      #
+      # If the runner subnet has an NSG or route table attached by
+      # hand, the template would detach it. The run stops unless
+      # RUNNER_SUBNET_ALLOW_DETACH is set to 'true'.
+
+      RUNNER_SUBNET_NAME: 'snet-github-runner'
+
+      RUNNER_SUBNET_ALLOW_DETACH: 'false'
 
       # ============================================================
       # PROD APPLICATION SECRETS
@@ -261,7 +259,6 @@ jobs:
               echo "APP_PUBLIC_ORIGIN=" >> "$GITHUB_ENV"
               echo "ENTRA_REDIRECT_URI=" >> "$GITHUB_ENV"
               echo "WORKER_BASE_URL=" >> "$GITHUB_ENV"
-
               echo "Front Door disabled."
               ;;
 
@@ -271,7 +268,6 @@ jobs:
               echo "APP_PUBLIC_ORIGIN=" >> "$GITHUB_ENV"
               echo "ENTRA_REDIRECT_URI=" >> "$GITHUB_ENV"
               echo "WORKER_BASE_URL=" >> "$GITHUB_ENV"
-
               echo "Front Door creation enabled."
               ;;
 
@@ -287,15 +283,10 @@ jobs:
               }
 
               echo "ENABLE_FRONT_DOOR=true" >> "$GITHUB_ENV"
-
               echo "FRONT_DOOR_ID=$FRONT_DOOR_INSTANCE_ID" >> "$GITHUB_ENV"
-
               echo "APP_PUBLIC_ORIGIN=https://$FRONT_DOOR_HOSTNAME" >> "$GITHUB_ENV"
-
               echo "ENTRA_REDIRECT_URI=https://$FRONT_DOOR_HOSTNAME/auth/entra/callback" >> "$GITHUB_ENV"
-
               echo "WORKER_BASE_URL=https://$FRONT_DOOR_HOSTNAME" >> "$GITHUB_ENV"
-
               echo "Front Door finalization enabled."
               ;;
 
@@ -309,14 +300,12 @@ jobs:
       # ============================================================
       # STEP 6: PREPARE PROD-ONLY INFRASTRUCTURE OVERRIDES
       #
-      # NEW:
-      #   1. Fix PostgreSQL geo-redundant storage.
-      #   2. Skip four monitoring metric alerts.
-      #   3. Skip optional ops-alerts module.
+      #   1. Container App name override.
+      #   2. PostgreSQL geo-redundant backup / HA.
+      #   3. Skip four monitoring metric alerts.
+      #   4. Skip optional ops-alerts module.
       #
       # All changes made in a temporary copy.
-      #
-      # Original files remain unchanged in GitHub.
       # ============================================================
 
       - name: Prepare PROD PostgreSQL and Monitoring Overrides
@@ -326,6 +315,7 @@ jobs:
 
           PROD_INFRA="$RUNNER_TEMP/tokenscope-prod-infra"
 
+          rm -rf "$PROD_INFRA"
           mkdir -p "$PROD_INFRA"
 
           cp -a infra/. "$PROD_INFRA/"
@@ -339,22 +329,26 @@ jobs:
 
           root = Path(os.environ["PROD_INFRA"])
 
-          # PROD-only Container App name override
+          # ================================================
+          # CONTAINER APP NAME OVERRIDE
+          # ================================================
+
           container_file = root / "modules" / "container-app.bicep"
-          
           content = container_file.read_text(encoding="utf-8")
-          
+
           old_name = "name: 'ca-${name}'"
           new_name = "name: 'ca-ts-prod-weu'"
-          
+
           if content.count(old_name) != 1:
-              raise SystemExit("ERROR: Container App name expression not found exactly once")
-          
+              raise SystemExit(
+                  "ERROR: Container App name expression not found exactly once"
+              )
+
           container_file.write_text(
               content.replace(old_name, new_name, 1),
               encoding="utf-8"
           )
-          
+
           print("PROD Container App name: ca-ts-prod-weu")
 
           # ================================================
@@ -362,34 +356,23 @@ jobs:
           # ================================================
 
           pg_file = root / "modules" / "postgresql.bicep"
-
           pg_content = pg_file.read_text(encoding="utf-8")
 
-          old_backup = (
-              "geoRedundantBackup: environment == 'production' "
-              "? 'Enabled' : 'Disabled'"
-          )
-
-          new_backup = "geoRedundantBackup: 'Disabled'"
-
           if os.environ["PROD_DISABLE_GEO_REDUNDANT_BACKUP"] == "true":
+              old_backup = (
+                  "geoRedundantBackup: environment == 'production' "
+                  "? 'Enabled' : 'Disabled'"
+              )
+              new_backup = "geoRedundantBackup: 'Disabled'"
 
               if pg_content.count(old_backup) != 1:
                   raise SystemExit(
-                      "ERROR: PostgreSQL backup expression "
-                      "not found exactly once."
+                      "ERROR: PostgreSQL backup expression not found exactly once."
                   )
 
-              pg_content = pg_content.replace(
-                  old_backup,
-                  new_backup,
-                  1
-              )
-
+              pg_content = pg_content.replace(old_backup, new_backup, 1)
               print("PostgreSQL geo-redundant backup disabled.")
 
-          # PostgreSQL HA is separate from geo-redundant backup.
-          # Only apply the PROD exception if explicitly enabled.
           if os.environ["PROD_DISABLE_POSTGRES_HA"] == "true":
               old_ha = (
                   "mode: environment == 'production' "
@@ -399,32 +382,23 @@ jobs:
 
               if pg_content.count(old_ha) != 1:
                   raise SystemExit(
-                      "ERROR: PostgreSQL HA expression "
-                      "not found exactly once."
+                      "ERROR: PostgreSQL HA expression not found exactly once."
                   )
 
               pg_content = pg_content.replace(old_ha, new_ha, 1)
               print("PostgreSQL HA disabled for PROD (approved exception).")
 
-          pg_file.write_text(
-              pg_content,
-              encoding="utf-8"
-          )
+          pg_file.write_text(pg_content, encoding="utf-8")
           print("PostgreSQL Bicep overrides saved to temporary copy.")
-
 
           # ================================================
           # MONITORING METRIC ALERT OVERRIDE
           # ================================================
 
           monitor_file = root / "modules" / "monitoring.bicep"
-
-          monitor_content = monitor_file.read_text(
-              encoding="utf-8"
-          )
+          monitor_content = monitor_file.read_text(encoding="utf-8")
 
           if os.environ["DEPLOY_MONITORING_ALERTS"] == "false":
-
               alert_names = (
                   "errorRateAlert",
                   "responseTimeAlert",
@@ -433,12 +407,10 @@ jobs:
               )
 
               for alert_name in alert_names:
-
                   old_alert = (
                       f"resource {alert_name} "
                       "'Microsoft.Insights/metricAlerts@2018-03-01' = {"
                   )
-
                   new_alert = (
                       f"resource {alert_name} "
                       "'Microsoft.Insights/metricAlerts@2018-03-01' "
@@ -446,37 +418,23 @@ jobs:
                   )
 
                   if monitor_content.count(old_alert) != 1:
-                      raise SystemExit(
-                          f"ERROR: Alert not found: {alert_name}"
-                      )
+                      raise SystemExit(f"ERROR: Alert not found: {alert_name}")
 
-                  monitor_content = monitor_content.replace(
-                      old_alert,
-                      new_alert,
-                      1
-                  )
+                  monitor_content = monitor_content.replace(old_alert, new_alert, 1)
 
-              monitor_file.write_text(
-                  monitor_content,
-                  encoding="utf-8"
-              )
+              monitor_file.write_text(monitor_content, encoding="utf-8")
 
               print("Four monitoring metric alerts skipped.")
-              print("Log Analytics and App Insights retained.")
-              print("DCE, DCR and monitoring RBAC retained.")
+              print("Log Analytics, App Insights, DCE, DCR and RBAC retained.")
 
           # ================================================
           # OPS ALERTS MODULE OVERRIDE
           # ================================================
 
           main_file = root / "main.bicep"
-
-          main_content = main_file.read_text(
-              encoding="utf-8"
-          )
+          main_content = main_file.read_text(encoding="utf-8")
 
           if os.environ["DEPLOY_APP_ALERTS"] == "false":
-
               pattern = (
                   r"(module\s+opsAlerts\s+"
                   r"'modules/ops-alerts\.bicep'\s*=\s*)"
@@ -491,20 +449,11 @@ jobs:
 
               if count != 1:
                   raise SystemExit(
-                      "ERROR: opsAlerts module declaration "
-                      "not found exactly once."
+                      "ERROR: opsAlerts module declaration not found exactly once."
                   )
 
-              main_file.write_text(
-                  updated,
-                  encoding="utf-8"
-              )
-
+              main_file.write_text(updated, encoding="utf-8")
               print("Optional ops-alerts module skipped.")
-
-          # ================================================
-          # CONFIRM OVERRIDES
-          # ================================================
 
           print("PROD temporary infrastructure prepared.")
           print("Original repository files remain unchanged.")
@@ -512,14 +461,8 @@ jobs:
 
           echo "PROD_INFRA=$PROD_INFRA" >> "$GITHUB_ENV"
 
-
       # ============================================================
       # STEP 7: PREPARE TEMPORARY PROD PARAMETERS
-      #
-      # Fix: enableFrontDoor may be missing or formatted
-      # differently in the existing PROD parameter file.
-      #
-      # Original repository files remain unchanged.
       # ============================================================
 
       - name: Prepare Temporary PROD Parameters
@@ -550,65 +493,181 @@ jobs:
           if enabled not in ("true", "false"):
               raise SystemExit("Invalid ENABLE_FRONT_DOOR value.")
 
-          # Confirm this is a supported root Bicep parameter.
-          if not re.search(
-              r"\bparam\s+enableFrontDoor\s+bool\b",
-              main_content
-          ):
-              raise SystemExit(
-                  "main.bicep does not declare "
-                  "param enableFrontDoor bool."
-              )
+          if not re.search(r"\bparam\s+enableFrontDoor\s+bool\b", main_content):
+              raise SystemExit("main.bicep does not declare param enableFrontDoor bool.")
 
-          # Match existing declaration, including whitespace,
-          # comments, and different values.
-          pattern = (
-              r"(?m)^[ \t]*param[ \t]+enableFrontDoor"
-              r"[ \t]*=[ \t]*[^\r\n]*"
-          )
-
+          pattern = r"(?m)^[ \t]*param[ \t]+enableFrontDoor[ \t]*=[ \t]*[^\r\n]*"
           matches = list(re.finditer(pattern, content))
 
           if len(matches) > 1:
-              raise SystemExit(
-                  "Duplicate enableFrontDoor parameters found."
-              )
+              raise SystemExit("Duplicate enableFrontDoor parameters found.")
 
           new_line = f"param enableFrontDoor = {enabled}"
 
           if len(matches) == 1:
-              content = re.sub(
-                  pattern,
-                  new_line,
-                  content,
-                  count=1
-              )
+              content = re.sub(pattern, new_line, content, count=1)
               print("Existing enableFrontDoor updated.")
           else:
               content = content.rstrip() + "\n\n" + new_line + "\n"
               print("Missing enableFrontDoor parameter added.")
 
-          param_file.write_text(
-              content,
-              encoding="utf-8"
-          )
+          param_file.write_text(content, encoding="utf-8")
 
           print(f"enableFrontDoor = {enabled}")
           print("Original repository files unchanged.")
           PY
 
-          echo "PROD_PARAM_FILE=$PROD_INFRA/parameters/prod.bicepparam" \
-            >> "$GITHUB_ENV"
-
+          echo "PROD_PARAM_FILE=$PROD_INFRA/parameters/prod.bicepparam" >> "$GITHUB_ENV"
 
       # ============================================================
-      # STEP 8: VALIDATE BICEP FILES
+      # STEP 7B: PRESERVE EXISTING RUNNER SUBNET
       #
-      # Original:
-      #   infra/main.bicep
+      # Fix: InUseSubnetCannotBeDeleted for snet-github-runner.
       #
-      # Updated:
-      #   Temporary PROD main.bicep
+      # Reads the live runner subnet from Azure and declares it in
+      # the TEMPORARY networking.bicep and prod.bicepparam.
+      # ============================================================
+
+      - name: Preserve Existing Runner Subnet
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VNET_NAME="$(az network vnet list \
+            -g "$AZURE_RESOURCE_GROUP" \
+            --query "[?subnets[?name=='$RUNNER_SUBNET_NAME']].name | [0]" \
+            -o tsv)"
+
+          test -n "$VNET_NAME" || {
+            echo "::error::No VNet in $AZURE_RESOURCE_GROUP contains $RUNNER_SUBNET_NAME"
+            exit 1
+          }
+
+          RUNNER_PREFIX="$(az network vnet subnet show \
+            -g "$AZURE_RESOURCE_GROUP" \
+            --vnet-name "$VNET_NAME" \
+            -n "$RUNNER_SUBNET_NAME" \
+            --query "addressPrefix || addressPrefixes[0]" \
+            -o tsv)"
+
+          RUNNER_NSG="$(az network vnet subnet show \
+            -g "$AZURE_RESOURCE_GROUP" \
+            --vnet-name "$VNET_NAME" \
+            -n "$RUNNER_SUBNET_NAME" \
+            --query "networkSecurityGroup.id" \
+            -o tsv)"
+
+          RUNNER_RT="$(az network vnet subnet show \
+            -g "$AZURE_RESOURCE_GROUP" \
+            --vnet-name "$VNET_NAME" \
+            -n "$RUNNER_SUBNET_NAME" \
+            --query "routeTable.id" \
+            -o tsv)"
+
+          echo "VNet:          $VNET_NAME"
+          echo "Runner subnet: $RUNNER_SUBNET_NAME"
+          echo "Prefix:        $RUNNER_PREFIX"
+          echo "NSG:           ${RUNNER_NSG:-none}"
+          echo "Route table:   ${RUNNER_RT:-none}"
+
+          [[ "$RUNNER_PREFIX" =~ ^[0-9.]+/[0-9]+$ ]] || {
+            echo "::error::Invalid runner subnet prefix: $RUNNER_PREFIX"
+            exit 1
+          }
+
+          if { [ -n "$RUNNER_NSG" ] || [ -n "$RUNNER_RT" ]; } \
+             && [ "$RUNNER_SUBNET_ALLOW_DETACH" != "true" ]; then
+            echo "::error::$RUNNER_SUBNET_NAME has an NSG or route table attached by hand."
+            echo "::error::The template would detach it. Review, then set RUNNER_SUBNET_ALLOW_DETACH to 'true' to continue."
+            exit 1
+          fi
+
+          export RUNNER_PREFIX
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path(os.environ["PROD_INFRA"])
+          subnet_name = os.environ["RUNNER_SUBNET_NAME"]
+          prefix = os.environ["RUNNER_PREFIX"]
+
+          # ================================================
+          # 1. TEMPORARY prod.bicepparam
+          #    Set buildSubnetPrefix to the live runner CIDR.
+          # ================================================
+
+          param_file = root / "parameters" / "prod.bicepparam"
+          params = param_file.read_text(encoding="utf-8")
+
+          pattern = r"(?m)^[ \t]*param[ \t]+buildSubnetPrefix[ \t]*=[^\r\n]*"
+          new_line = f"param buildSubnetPrefix = '{prefix}'"
+
+          matches = re.findall(pattern, params)
+
+          if len(matches) > 1:
+              raise SystemExit("Duplicate buildSubnetPrefix parameters found.")
+
+          if matches:
+              params = re.sub(pattern, new_line, params, count=1)
+              print("Existing buildSubnetPrefix updated.")
+          else:
+              params = params.rstrip() + "\n\n" + new_line + "\n"
+              print("buildSubnetPrefix added.")
+
+          param_file.write_text(params, encoding="utf-8")
+
+          # ================================================
+          # 2. TEMPORARY networking.bicep
+          #    Name the build subnet snet-github-runner.
+          # ================================================
+
+          net_file = root / "modules" / "networking.bicep"
+          lines = net_file.read_text(encoding="utf-8").splitlines(keepends=True)
+
+          hits = [
+              i for i, line in enumerate(lines)
+              if "buildSubnetPrefix" in line
+              and re.search(r"\b(addressPrefix|prefix)\b\s*:", line)
+          ]
+
+          if len(hits) != 1:
+              raise SystemExit(
+                  "ERROR: build subnet prefix line not found exactly once "
+                  f"in networking.bicep (found {len(hits)})."
+              )
+
+          name_index = None
+
+          for i in range(hits[0] - 1, max(hits[0] - 20, -1), -1):
+              if re.match(r"^\s*name\s*:", lines[i]):
+                  name_index = i
+                  break
+
+          if name_index is None:
+              raise SystemExit("ERROR: build subnet name line not found above its prefix.")
+
+          old = lines[name_index]
+          indent = re.match(r"^(\s*)", old).group(1)
+          ending = "\r\n" if old.endswith("\r\n") else "\n"
+          new = f"{indent}name: '{subnet_name}'{ending}"
+
+          if old.strip() == new.strip():
+              print("Build subnet already named " + subnet_name + ".")
+          else:
+              lines[name_index] = new
+              net_file.write_text("".join(lines), encoding="utf-8")
+              print("Build subnet name changed:")
+              print("  from: " + old.strip())
+              print("  to:   " + new.strip())
+
+          print("Runner subnet preserved in temporary template.")
+          print("Original repository files unchanged.")
+          PY
+
+      # ============================================================
+      # STEP 8: VALIDATE BICEP FILES (temporary copy)
       # ============================================================
 
       - name: Validate PROD Bicep
@@ -630,8 +689,6 @@ jobs:
 
       # ============================================================
       # STEP 9: VALIDATE ARM DEPLOYMENT
-      #
-      # Uses the temporary PROD parameter file.
       # ============================================================
 
       - name: Validate PROD ARM Deployment
@@ -648,11 +705,56 @@ jobs:
           echo "SUCCESS: PROD ARM validation completed"
 
       # ============================================================
-      # STEP 10: DEPLOY PROD INFRASTRUCTURE DIRECTLY
-      #
-      # NO WHAT-IF STEP.
-      #
-      # No changes to existing DEV/TEST files.
+      # STEP 9B: GUARD AGAINST SUBNET / RESOURCE DELETION
+      # ============================================================
+
+      - name: Guard Against Subnet Deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az deployment group what-if \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --parameters "$PROD_PARAM_FILE" \
+            --result-format FullResourcePayloads \
+            --no-pretty-print \
+            --only-show-errors > whatif.json
+
+          python3 - <<'PY'
+          import json
+
+          with open("whatif.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          problems = []
+
+          for change in data.get("changes", []):
+              rid = change.get("resourceId", "")
+              kind = change.get("changeType", "")
+
+              if kind == "Delete":
+                  problems.append(f"Delete: {rid}")
+
+              if "/virtualNetworks/" in rid and "/subnets/" not in rid:
+                  before = (change.get("before") or {}).get("properties", {})
+                  after = (change.get("after") or {}).get("properties", {})
+
+                  old = {s.get("name") for s in before.get("subnets", [])}
+                  new = {s.get("name") for s in after.get("subnets", [])}
+
+                  for name in sorted(old - new):
+                      problems.append(f"Subnet would be removed: {name}")
+
+          if problems:
+              for p in problems:
+                  print("::error::" + p)
+              raise SystemExit("Deployment stopped: deletions detected.")
+
+          print("SUCCESS: No subnet removals or resource deletions.")
+          PY
+
+      # ============================================================
+      # STEP 10: DEPLOY PROD INFRASTRUCTURE
       # ============================================================
 
       - name: Deploy PROD Infrastructure
@@ -694,11 +796,8 @@ jobs:
           python3 - <<'PY'
           import json
 
-          with open(
-              "deployment-outputs.json",
-              encoding="utf-8"
-          ) as f:
-              outputs = json.load(f)
+          with open("deployment-outputs.json", encoding="utf-8") as f:
+              outputs = json.load(f) or {}
 
           for key in (
               "acrLoginServer",
@@ -711,7 +810,6 @@ jobs:
               "frontDoorPrivateLinkRequestMessage"
           ):
               value = outputs.get(key, {}).get("value", "")
-
               if value:
                   print(f"{key}: {value}")
           PY
@@ -731,6 +829,7 @@ jobs:
             echo "- Subscription: $EXPECTED_SUBSCRIPTION"
             echo "- Region: $AZURE_LOCATION"
             echo "- Front Door phase: $FRONT_DOOR_PHASE"
+            echo "- Runner subnet preserved: $RUNNER_SUBNET_NAME"
             echo ""
             echo "- PostgreSQL geo backup override: $PROD_DISABLE_GEO_REDUNDANT_BACKUP"
             echo "- PostgreSQL HA disabled (temporary exception): $PROD_DISABLE_POSTGRES_HA"
@@ -738,8 +837,6 @@ jobs:
             echo "- Application alerts enabled: $DEPLOY_APP_ALERTS"
             echo ""
             echo "Shared repository Bicep files remain unchanged."
-            echo ""
-            echo "Infrastructure deploy completed only if apply succeeded."
             echo "Verify Container App health before image release."
           } >> "$GITHUB_STEP_SUMMARY"
 

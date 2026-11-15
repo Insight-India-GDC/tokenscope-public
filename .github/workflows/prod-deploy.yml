@@ -85,13 +85,14 @@ jobs:
       # Declared in the temporary template so Bicep does not try
       # to delete it (InUseSubnetCannotBeDeleted).
       #
-      # If the runner subnet has an NSG or route table attached by
-      # hand, the template would detach it. The run stops unless
-      # RUNNER_SUBNET_ALLOW_DETACH is set to 'true'.
+      # The runner subnet's own NSG is re-declared on that subnet
+      # ONLY, so the deployment keeps it attached.
+      #
+      # Route tables are not handled: the run stops if one exists.
 
       RUNNER_SUBNET_NAME: 'snet-github-runner'
 
-      RUNNER_SUBNET_ALLOW_DETACH: 'false'
+      RUNNER_SUBNET_EXPECTED_NSG: 'nsg-tokenscope-prod-github-runner'
 
       # ============================================================
       # PROD APPLICATION SECRETS
@@ -520,15 +521,16 @@ jobs:
           echo "PROD_PARAM_FILE=$PROD_INFRA/parameters/prod.bicepparam" >> "$GITHUB_ENV"
 
       # ============================================================
-      # STEP 7B: PRESERVE EXISTING RUNNER SUBNET
+      # STEP 7B: PRESERVE EXISTING RUNNER SUBNET AND ITS NSG
       #
       # Fix: InUseSubnetCannotBeDeleted for snet-github-runner.
       #
-      # Reads the live runner subnet from Azure and declares it in
-      # the TEMPORARY networking.bicep and prod.bicepparam.
+      # Reads the live runner subnet from Azure and declares it,
+      # with its own NSG, in the TEMPORARY networking.bicep and
+      # prod.bicepparam. Other subnets are not changed.
       # ============================================================
 
-      - name: Preserve Existing Runner Subnet
+      - name: Preserve Existing Runner Subnet and NSG
         shell: bash
         run: |
           set -euo pipefail
@@ -543,26 +545,15 @@ jobs:
             exit 1
           }
 
-          RUNNER_PREFIX="$(az network vnet subnet show \
+          SUBNET_JSON="$(az network vnet subnet show \
             -g "$AZURE_RESOURCE_GROUP" \
             --vnet-name "$VNET_NAME" \
             -n "$RUNNER_SUBNET_NAME" \
-            --query "addressPrefix || addressPrefixes[0]" \
-            -o tsv)"
+            -o json)"
 
-          RUNNER_NSG="$(az network vnet subnet show \
-            -g "$AZURE_RESOURCE_GROUP" \
-            --vnet-name "$VNET_NAME" \
-            -n "$RUNNER_SUBNET_NAME" \
-            --query "networkSecurityGroup.id" \
-            -o tsv)"
-
-          RUNNER_RT="$(az network vnet subnet show \
-            -g "$AZURE_RESOURCE_GROUP" \
-            --vnet-name "$VNET_NAME" \
-            -n "$RUNNER_SUBNET_NAME" \
-            --query "routeTable.id" \
-            -o tsv)"
+          RUNNER_PREFIX="$(jq -r '.addressPrefix // .addressPrefixes[0] // empty' <<< "$SUBNET_JSON")"
+          RUNNER_NSG="$(jq -r '.networkSecurityGroup.id // empty' <<< "$SUBNET_JSON")"
+          RUNNER_RT="$(jq -r '.routeTable.id // empty' <<< "$SUBNET_JSON")"
 
           echo "VNet:          $VNET_NAME"
           echo "Runner subnet: $RUNNER_SUBNET_NAME"
@@ -575,14 +566,25 @@ jobs:
             exit 1
           }
 
-          if { [ -n "$RUNNER_NSG" ] || [ -n "$RUNNER_RT" ]; } \
-             && [ "$RUNNER_SUBNET_ALLOW_DETACH" != "true" ]; then
-            echo "::error::$RUNNER_SUBNET_NAME has an NSG or route table attached by hand."
-            echo "::error::The template would detach it. Review, then set RUNNER_SUBNET_ALLOW_DETACH to 'true' to continue."
+          test -z "$RUNNER_RT" || {
+            echo "::error::$RUNNER_SUBNET_NAME has a route table. This workflow does not preserve route tables."
             exit 1
-          fi
+          }
 
-          export RUNNER_PREFIX
+          test -n "$RUNNER_NSG" || {
+            echo "::error::$RUNNER_SUBNET_NAME has no NSG. Expected $RUNNER_SUBNET_EXPECTED_NSG."
+            exit 1
+          }
+
+          test "${RUNNER_NSG##*/}" = "$RUNNER_SUBNET_EXPECTED_NSG" || {
+            echo "::error::Unexpected NSG on runner subnet: ${RUNNER_NSG##*/}"
+            exit 1
+          }
+
+          echo "VNET_NAME=$VNET_NAME" >> "$GITHUB_ENV"
+          echo "RUNNER_NSG_ID=$RUNNER_NSG" >> "$GITHUB_ENV"
+
+          export RUNNER_PREFIX RUNNER_NSG
 
           python3 - <<'PY'
           import os
@@ -592,6 +594,7 @@ jobs:
           root = Path(os.environ["PROD_INFRA"])
           subnet_name = os.environ["RUNNER_SUBNET_NAME"]
           prefix = os.environ["RUNNER_PREFIX"]
+          nsg_id = os.environ["RUNNER_NSG"]
 
           # ================================================
           # 1. TEMPORARY prod.bicepparam
@@ -620,11 +623,15 @@ jobs:
 
           # ================================================
           # 2. TEMPORARY networking.bicep
-          #    Name the build subnet snet-github-runner.
+          #    a) Name the build subnet snet-github-runner.
+          #    b) Attach the runner NSG to that subnet only.
           # ================================================
 
           net_file = root / "modules" / "networking.bicep"
           lines = net_file.read_text(encoding="utf-8").splitlines(keepends=True)
+
+          def indent_of(line):
+              return len(line) - len(line.lstrip(" \t"))
 
           hits = [
               i for i, line in enumerate(lines)
@@ -638,9 +645,12 @@ jobs:
                   f"in networking.bicep (found {len(hits)})."
               )
 
+          prefix_index = hits[0]
+
+          # ---- a) subnet name -----------------------------
           name_index = None
 
-          for i in range(hits[0] - 1, max(hits[0] - 20, -1), -1):
+          for i in range(prefix_index - 1, max(prefix_index - 20, -1), -1):
               if re.match(r"^\s*name\s*:", lines[i]):
                   name_index = i
                   break
@@ -649,21 +659,64 @@ jobs:
               raise SystemExit("ERROR: build subnet name line not found above its prefix.")
 
           old = lines[name_index]
-          indent = re.match(r"^(\s*)", old).group(1)
           ending = "\r\n" if old.endswith("\r\n") else "\n"
-          new = f"{indent}name: '{subnet_name}'{ending}"
+          new = f"{old[:indent_of(old)]}name: '{subnet_name}'{ending}"
 
-          if old.strip() == new.strip():
-              print("Build subnet already named " + subnet_name + ".")
-          else:
+          if old.strip() != new.strip():
               lines[name_index] = new
-              net_file.write_text("".join(lines), encoding="utf-8")
               print("Build subnet name changed:")
               print("  from: " + old.strip())
               print("  to:   " + new.strip())
+          else:
+              print("Build subnet already named " + subnet_name + ".")
 
-          print("Runner subnet preserved in temporary template.")
-          print("Original repository files unchanged.")
+          # ---- b) NSG on the build subnet only -------------
+          prop_line = lines[prefix_index]
+          prop_pad = prop_line[:indent_of(prop_line)]
+          prop_indent = indent_of(prop_line)
+
+          # End of this subnet's properties block.
+          end_index = prefix_index + 1
+          while end_index < len(lines):
+              line = lines[end_index]
+              if line.strip() and indent_of(line) < prop_indent:
+                  break
+              end_index += 1
+
+          nsg_block = [
+              f"{prop_pad}networkSecurityGroup: {{{ending}",
+              f"{prop_pad}  id: '{nsg_id}'{ending}",
+              f"{prop_pad}}}{ending}",
+          ]
+
+          nsg_start = None
+          for i in range(prefix_index + 1, end_index):
+              if (indent_of(lines[i]) == prop_indent
+                      and lines[i].lstrip().startswith("networkSecurityGroup")):
+                  nsg_start = i
+                  break
+
+          if nsg_start is None:
+              lines[prefix_index + 1:prefix_index + 1] = nsg_block
+              print("Runner NSG added to build subnet.")
+          else:
+              depth = 0
+              nsg_end = nsg_start
+              while True:
+                  depth += lines[nsg_end].count("{") - lines[nsg_end].count("}")
+                  if depth <= 0:
+                      break
+                  nsg_end += 1
+                  if nsg_end >= len(lines):
+                      raise SystemExit("ERROR: unbalanced networkSecurityGroup block.")
+              print("Existing build-subnet NSG expression replaced:")
+              print("  " + "".join(lines[nsg_start:nsg_end + 1]).strip())
+              lines[nsg_start:nsg_end + 1] = nsg_block
+
+          net_file.write_text("".join(lines), encoding="utf-8")
+
+          print("Runner subnet and NSG preserved in temporary template.")
+          print("Other subnets unchanged. Original repository files unchanged.")
           PY
 
       # ============================================================
@@ -779,6 +832,34 @@ jobs:
           echo "SUCCESS: PROD infrastructure deployment completed"
 
       # ============================================================
+      # STEP 10B: VERIFY RUNNER SUBNET AND NSG AFTER DEPLOYMENT
+      # ============================================================
+
+      - name: Verify Runner Subnet and NSG
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACTUAL_NSG="$(az network vnet subnet show \
+            -g "$AZURE_RESOURCE_GROUP" \
+            --vnet-name "$VNET_NAME" \
+            -n "$RUNNER_SUBNET_NAME" \
+            --query "networkSecurityGroup.id" \
+            -o tsv)"
+
+          if [ "${ACTUAL_NSG,,}" != "${RUNNER_NSG_ID,,}" ]; then
+            echo "::warning::Runner NSG was not attached after deployment. Re-attaching."
+            az network vnet subnet update \
+              -g "$AZURE_RESOURCE_GROUP" \
+              --vnet-name "$VNET_NAME" \
+              -n "$RUNNER_SUBNET_NAME" \
+              --network-security-group "$RUNNER_NSG_ID" \
+              --output none
+          fi
+
+          echo "SUCCESS: $RUNNER_SUBNET_NAME exists with NSG ${RUNNER_NSG_ID##*/}"
+
+      # ============================================================
       # STEP 11: SHOW DEPLOYMENT OUTPUTS
       # ============================================================
 
@@ -829,7 +910,7 @@ jobs:
             echo "- Subscription: $EXPECTED_SUBSCRIPTION"
             echo "- Region: $AZURE_LOCATION"
             echo "- Front Door phase: $FRONT_DOOR_PHASE"
-            echo "- Runner subnet preserved: $RUNNER_SUBNET_NAME"
+            echo "- Runner subnet preserved: $RUNNER_SUBNET_NAME (NSG: $RUNNER_SUBNET_EXPECTED_NSG)"
             echo ""
             echo "- PostgreSQL geo backup override: $PROD_DISABLE_GEO_REDUNDANT_BACKUP"
             echo "- PostgreSQL HA disabled (temporary exception): $PROD_DISABLE_POSTGRES_HA"

@@ -50,7 +50,7 @@ jobs:
       # ============================================================
       #
       # off:      Front Door disabled.
-      # create:   Create Front Door Premium.
+      # create:   Create Front Door Premium (one profile only).
       # finalize: Configure Front Door instance ID, public URL,
       #           Entra callback and workers.
 
@@ -82,22 +82,21 @@ jobs:
       # EXISTING RUNNER SUBNET (created outside Bicep)
       # ============================================================
       #
-      # Declared in the temporary template so Bicep does not try
-      # to delete it (InUseSubnetCannotBeDeleted).
+      # Fixes:
+      #   - InUseSubnetCannotBeDeleted   (subnet kept in template)
+      #   - Runner NSG detached          (NSG kept on runner subnet)
+      #   - Runner goes Offline          (NAT gateway kept)
       #
-      # The runner subnet's own NSG is re-declared on that subnet
-      # ONLY, so the deployment keeps it attached.
-      #
-      # Route tables are not handled: the run stops if one exists.
+      # The runner subnet MUST have a NAT gateway attached before
+      # this workflow runs. Otherwise the run stops at Step 7B.
 
       RUNNER_SUBNET_NAME: 'snet-github-runner'
 
       RUNNER_SUBNET_EXPECTED_NSG: 'nsg-tokenscope-prod-github-runner'
 
       # Old, unused subnets that the deployment may remove.
-      # Space-separated. Each one is checked in Azure first:
-      # the run stops if it still has any NIC, private endpoint,
-      # service link or delegation in use.
+      # Space-separated. Each is checked in Azure first: the run
+      # stops if it still has any NIC, private endpoint or link.
 
       ALLOWED_SUBNET_REMOVALS: 'snet-build'
 
@@ -201,7 +200,42 @@ jobs:
             --name "$AZURE_RESOURCE_GROUP" \
             --output none
 
+          command -v jq >/dev/null || {
+            echo "::error::jq is not installed on the runner (sudo apt-get install -y jq)"
+            exit 1
+          }
+
           echo "SUCCESS: PROD subscription and resource group verified"
+
+      # ============================================================
+      # STEP 3B: WAIT FOR ANY RUNNING DEPLOYMENT
+      #
+      # Prevents DeploymentActive conflicts with a previous run
+      # that is still running in Azure.
+      # ============================================================
+
+      - name: Wait for Running Deployments
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for i in $(seq 1 40); do
+            RUNNING="$(az deployment group list \
+              -g "$AZURE_RESOURCE_GROUP" \
+              --query "[?properties.provisioningState=='Running' || properties.provisioningState=='Accepted'].name" \
+              -o tsv)"
+
+            if [ -z "$RUNNING" ]; then
+              echo "No running deployments."
+              exit 0
+            fi
+
+            echo "Waiting for running deployment(s): $RUNNING (attempt $i/40)"
+            sleep 30
+          done
+
+          echo "::error::A previous deployment is still running after 20 minutes."
+          exit 1
 
       # ============================================================
       # STEP 4: VALIDATE REQUIRED SECRETS
@@ -243,9 +277,7 @@ jobs:
               raise SystemExit("Invalid OIDC_TOKEN_KEY Base64")
 
           if len(data) != 32:
-              raise SystemExit(
-                  "OIDC_TOKEN_KEY must decode to 32 bytes"
-              )
+              raise SystemExit("OIDC_TOKEN_KEY must decode to 32 bytes")
 
           print("SUCCESS: PROD secrets validated")
           PY
@@ -348,15 +380,9 @@ jobs:
           new_name = "name: 'ca-ts-prod-weu'"
 
           if content.count(old_name) != 1:
-              raise SystemExit(
-                  "ERROR: Container App name expression not found exactly once"
-              )
+              raise SystemExit("ERROR: Container App name expression not found exactly once")
 
-          container_file.write_text(
-              content.replace(old_name, new_name, 1),
-              encoding="utf-8"
-          )
-
+          container_file.write_text(content.replace(old_name, new_name, 1), encoding="utf-8")
           print("PROD Container App name: ca-ts-prod-weu")
 
           # ================================================
@@ -367,37 +393,26 @@ jobs:
           pg_content = pg_file.read_text(encoding="utf-8")
 
           if os.environ["PROD_DISABLE_GEO_REDUNDANT_BACKUP"] == "true":
-              old_backup = (
-                  "geoRedundantBackup: environment == 'production' "
-                  "? 'Enabled' : 'Disabled'"
-              )
+              old_backup = "geoRedundantBackup: environment == 'production' ? 'Enabled' : 'Disabled'"
               new_backup = "geoRedundantBackup: 'Disabled'"
 
               if pg_content.count(old_backup) != 1:
-                  raise SystemExit(
-                      "ERROR: PostgreSQL backup expression not found exactly once."
-                  )
+                  raise SystemExit("ERROR: PostgreSQL backup expression not found exactly once.")
 
               pg_content = pg_content.replace(old_backup, new_backup, 1)
               print("PostgreSQL geo-redundant backup disabled.")
 
           if os.environ["PROD_DISABLE_POSTGRES_HA"] == "true":
-              old_ha = (
-                  "mode: environment == 'production' "
-                  "? 'ZoneRedundant' : 'Disabled'"
-              )
+              old_ha = "mode: environment == 'production' ? 'ZoneRedundant' : 'Disabled'"
               new_ha = "mode: 'Disabled'"
 
               if pg_content.count(old_ha) != 1:
-                  raise SystemExit(
-                      "ERROR: PostgreSQL HA expression not found exactly once."
-                  )
+                  raise SystemExit("ERROR: PostgreSQL HA expression not found exactly once.")
 
               pg_content = pg_content.replace(old_ha, new_ha, 1)
               print("PostgreSQL HA disabled for PROD (approved exception).")
 
           pg_file.write_text(pg_content, encoding="utf-8")
-          print("PostgreSQL Bicep overrides saved to temporary copy.")
 
           # ================================================
           # MONITORING METRIC ALERT OVERRIDE
@@ -407,23 +422,14 @@ jobs:
           monitor_content = monitor_file.read_text(encoding="utf-8")
 
           if os.environ["DEPLOY_MONITORING_ALERTS"] == "false":
-              alert_names = (
+              for alert_name in (
                   "errorRateAlert",
                   "responseTimeAlert",
                   "exceptionRateAlert",
                   "dependencyFailureAlert"
-              )
-
-              for alert_name in alert_names:
-                  old_alert = (
-                      f"resource {alert_name} "
-                      "'Microsoft.Insights/metricAlerts@2018-03-01' = {"
-                  )
-                  new_alert = (
-                      f"resource {alert_name} "
-                      "'Microsoft.Insights/metricAlerts@2018-03-01' "
-                      "= if (false) {"
-                  )
+              ):
+                  old_alert = f"resource {alert_name} 'Microsoft.Insights/metricAlerts@2018-03-01' = {{"
+                  new_alert = f"resource {alert_name} 'Microsoft.Insights/metricAlerts@2018-03-01' = if (false) {{"
 
                   if monitor_content.count(old_alert) != 1:
                       raise SystemExit(f"ERROR: Alert not found: {alert_name}")
@@ -431,9 +437,7 @@ jobs:
                   monitor_content = monitor_content.replace(old_alert, new_alert, 1)
 
               monitor_file.write_text(monitor_content, encoding="utf-8")
-
               print("Four monitoring metric alerts skipped.")
-              print("Log Analytics, App Insights, DCE, DCR and RBAC retained.")
 
           # ================================================
           # OPS ALERTS MODULE OVERRIDE
@@ -449,28 +453,21 @@ jobs:
                   r"(?:if\s*\([^)]*\)\s*)?\{"
               )
 
-              updated, count = re.subn(
-                  pattern,
-                  r"\g<1>if (false) {",
-                  main_content
-              )
+              updated, count = re.subn(pattern, r"\g<1>if (false) {", main_content)
 
               if count != 1:
-                  raise SystemExit(
-                      "ERROR: opsAlerts module declaration not found exactly once."
-                  )
+                  raise SystemExit("ERROR: opsAlerts module declaration not found exactly once.")
 
               main_file.write_text(updated, encoding="utf-8")
               print("Optional ops-alerts module skipped.")
 
-          print("PROD temporary infrastructure prepared.")
-          print("Original repository files remain unchanged.")
+          print("PROD temporary infrastructure prepared. Repository files unchanged.")
           PY
 
           echo "PROD_INFRA=$PROD_INFRA" >> "$GITHUB_ENV"
 
       # ============================================================
-      # STEP 7: PREPARE TEMPORARY PROD PARAMETERS
+      # STEP 7: PREPARE TEMPORARY PROD PARAMETERS (Front Door)
       # ============================================================
 
       - name: Prepare Temporary PROD Parameters
@@ -490,9 +487,6 @@ jobs:
           if not param_file.is_file():
               raise SystemExit("PROD parameter file not found.")
 
-          if not main_file.is_file():
-              raise SystemExit("PROD main.bicep not found.")
-
           content = param_file.read_text(encoding="utf-8")
           main_content = main_file.read_text(encoding="utf-8")
 
@@ -504,20 +498,27 @@ jobs:
           if not re.search(r"\bparam\s+enableFrontDoor\s+bool\b", main_content):
               raise SystemExit("main.bicep does not declare param enableFrontDoor bool.")
 
-          pattern = r"(?m)^[ \t]*param[ \t]+enableFrontDoor[ \t]*=[ \t]*[^\r\n]*"
-          matches = list(re.finditer(pattern, content))
+          def set_param(text, name, value_literal):
+              pattern = rf"(?m)^[ \t]*param[ \t]+{name}[ \t]*=[^\r\n]*"
+              line = f"param {name} = {value_literal}"
+              found = re.findall(pattern, text)
+              if len(found) > 1:
+                  raise SystemExit(f"Duplicate {name} parameters found.")
+              if found:
+                  return re.sub(pattern, line, text, count=1)
+              return text.rstrip() + "\n\n" + line + "\n"
 
-          if len(matches) > 1:
-              raise SystemExit("Duplicate enableFrontDoor parameters found.")
+          content = set_param(content, "enableFrontDoor", enabled)
 
-          new_line = f"param enableFrontDoor = {enabled}"
+          if enabled == "true":
+              content = set_param(content, "frontDoorSku", "'Premium'")
 
-          if len(matches) == 1:
-              content = re.sub(pattern, new_line, content, count=1)
-              print("Existing enableFrontDoor updated.")
-          else:
-              content = content.rstrip() + "\n\n" + new_line + "\n"
-              print("Missing enableFrontDoor parameter added.")
+          if os.environ["FRONT_DOOR_PHASE"] == "finalize":
+              content = set_param(content, "frontDoorId", f"'{os.environ['FRONT_DOOR_ID']}'")
+              content = set_param(content, "appPublicOrigin", f"'{os.environ['APP_PUBLIC_ORIGIN']}'")
+              content = set_param(content, "entraIdRedirectUri", f"'{os.environ['ENTRA_REDIRECT_URI']}'")
+              content = set_param(content, "workerBaseUrl", f"'{os.environ['WORKER_BASE_URL']}'")
+              print("Front Door finalize values applied.")
 
           param_file.write_text(content, encoding="utf-8")
 
@@ -528,16 +529,18 @@ jobs:
           echo "PROD_PARAM_FILE=$PROD_INFRA/parameters/prod.bicepparam" >> "$GITHUB_ENV"
 
       # ============================================================
-      # STEP 7B: PRESERVE EXISTING RUNNER SUBNET AND ITS NSG
+      # STEP 7B: PRESERVE RUNNER SUBNET, NSG AND NAT GATEWAY
       #
-      # Fix: InUseSubnetCannotBeDeleted for snet-github-runner.
+      # Fixes:
+      #   - InUseSubnetCannotBeDeleted for snet-github-runner
+      #   - NSG detached from runner subnet
+      #   - Runner offline because outbound internet removed
       #
       # Reads the live runner subnet from Azure and declares it,
-      # with its own NSG, in the TEMPORARY networking.bicep and
-      # prod.bicepparam. Other subnets are not changed.
+      # with its NSG and NAT gateway, in the TEMPORARY template.
       # ============================================================
 
-      - name: Preserve Existing Runner Subnet and NSG
+      - name: Preserve Runner Subnet, NSG and NAT Gateway
         shell: bash
         run: |
           set -euo pipefail
@@ -561,11 +564,13 @@ jobs:
           RUNNER_PREFIX="$(jq -r '.addressPrefix // .addressPrefixes[0] // empty' <<< "$SUBNET_JSON")"
           RUNNER_NSG="$(jq -r '.networkSecurityGroup.id // empty' <<< "$SUBNET_JSON")"
           RUNNER_RT="$(jq -r '.routeTable.id // empty' <<< "$SUBNET_JSON")"
+          RUNNER_NAT_ID="$(jq -r '.natGateway.id // empty' <<< "$SUBNET_JSON")"
 
           echo "VNet:          $VNET_NAME"
           echo "Runner subnet: $RUNNER_SUBNET_NAME"
           echo "Prefix:        $RUNNER_PREFIX"
           echo "NSG:           ${RUNNER_NSG:-none}"
+          echo "NAT gateway:   ${RUNNER_NAT_ID:-none}"
           echo "Route table:   ${RUNNER_RT:-none}"
 
           [[ "$RUNNER_PREFIX" =~ ^[0-9.]+/[0-9]+$ ]] || {
@@ -588,10 +593,18 @@ jobs:
             exit 1
           }
 
+          test -n "$RUNNER_NAT_ID" || {
+            echo "::error::$RUNNER_SUBNET_NAME has no NAT gateway."
+            echo "::error::Without it the runner loses internet during deployment and goes Offline."
+            echo "::error::Attach natgw-tokenscope-prod to $RUNNER_SUBNET_NAME, then re-run."
+            exit 1
+          }
+
           echo "VNET_NAME=$VNET_NAME" >> "$GITHUB_ENV"
           echo "RUNNER_NSG_ID=$RUNNER_NSG" >> "$GITHUB_ENV"
+          echo "RUNNER_NAT_ID=$RUNNER_NAT_ID" >> "$GITHUB_ENV"
 
-          export RUNNER_PREFIX RUNNER_NSG
+          export RUNNER_PREFIX RUNNER_NSG RUNNER_NAT_ID
 
           python3 - <<'PY'
           import os
@@ -602,36 +615,42 @@ jobs:
           subnet_name = os.environ["RUNNER_SUBNET_NAME"]
           prefix = os.environ["RUNNER_PREFIX"]
           nsg_id = os.environ["RUNNER_NSG"]
-
-          # ================================================
-          # 1. TEMPORARY prod.bicepparam
-          #    Set buildSubnetPrefix to the live runner CIDR.
-          # ================================================
+          nat_id = os.environ["RUNNER_NAT_ID"]
 
           param_file = root / "parameters" / "prod.bicepparam"
-          params = param_file.read_text(encoding="utf-8")
 
-          pattern = r"(?m)^[ \t]*param[ \t]+buildSubnetPrefix[ \t]*=[^\r\n]*"
-          new_line = f"param buildSubnetPrefix = '{prefix}'"
-
-          matches = re.findall(pattern, params)
-
-          if len(matches) > 1:
-              raise SystemExit("Duplicate buildSubnetPrefix parameters found.")
-
-          if matches:
-              params = re.sub(pattern, new_line, params, count=1)
-              print("Existing buildSubnetPrefix updated.")
-          else:
-              params = params.rstrip() + "\n\n" + new_line + "\n"
-              print("buildSubnetPrefix added.")
-
-          param_file.write_text(params, encoding="utf-8")
+          def set_param(name, value):
+              text = param_file.read_text(encoding="utf-8")
+              pattern = rf"(?m)^[ \t]*param[ \t]+{name}[ \t]*=[^\r\n]*"
+              line = f"param {name} = '{value}'"
+              found = re.findall(pattern, text)
+              if len(found) > 1:
+                  raise SystemExit(f"Duplicate {name} parameters found.")
+              if found:
+                  text = re.sub(pattern, line, text, count=1)
+              else:
+                  text = text.rstrip() + "\n\n" + line + "\n"
+              param_file.write_text(text, encoding="utf-8")
 
           # ================================================
-          # 2. TEMPORARY networking.bicep
-          #    a) Name the build subnet snet-github-runner.
-          #    b) Attach the runner NSG to that subnet only.
+          # 1. Runner subnet CIDR -> buildSubnetPrefix
+          # ================================================
+
+          set_param("buildSubnetPrefix", prefix)
+          print(f"buildSubnetPrefix = {prefix}")
+
+          # ================================================
+          # 2. NAT gateway -> natGatewayId
+          #    main.bicep attaches it to the Container Apps
+          #    and build (runner) subnets.
+          # ================================================
+
+          set_param("natGatewayId", nat_id)
+          print("natGatewayId kept: " + nat_id.rsplit("/", 1)[-1])
+
+          # ================================================
+          # 3. networking.bicep: name build subnet
+          #    snet-github-runner and attach its NSG only.
           # ================================================
 
           net_file = root / "modules" / "networking.bicep"
@@ -654,9 +673,8 @@ jobs:
 
           prefix_index = hits[0]
 
-          # ---- a) subnet name -----------------------------
+          # ---- subnet name --------------------------------
           name_index = None
-
           for i in range(prefix_index - 1, max(prefix_index - 20, -1), -1):
               if re.match(r"^\s*name\s*:", lines[i]):
                   name_index = i
@@ -671,18 +689,15 @@ jobs:
 
           if old.strip() != new.strip():
               lines[name_index] = new
-              print("Build subnet name changed:")
-              print("  from: " + old.strip())
-              print("  to:   " + new.strip())
+              print("Build subnet renamed: " + old.strip() + " -> " + new.strip())
           else:
               print("Build subnet already named " + subnet_name + ".")
 
-          # ---- b) NSG on the build subnet only -------------
+          # ---- NSG on build subnet only -------------------
           prop_line = lines[prefix_index]
           prop_pad = prop_line[:indent_of(prop_line)]
           prop_indent = indent_of(prop_line)
 
-          # End of this subnet's properties block.
           end_index = prefix_index + 1
           while end_index < len(lines):
               line = lines[end_index]
@@ -716,14 +731,13 @@ jobs:
                   nsg_end += 1
                   if nsg_end >= len(lines):
                       raise SystemExit("ERROR: unbalanced networkSecurityGroup block.")
-              print("Existing build-subnet NSG expression replaced:")
-              print("  " + "".join(lines[nsg_start:nsg_end + 1]).strip())
               lines[nsg_start:nsg_end + 1] = nsg_block
+              print("Existing build-subnet NSG expression replaced with runner NSG.")
 
           net_file.write_text("".join(lines), encoding="utf-8")
 
-          print("Runner subnet and NSG preserved in temporary template.")
-          print("Other subnets unchanged. Original repository files unchanged.")
+          print("Runner subnet, NSG and NAT gateway preserved in temporary template.")
+          print("Original repository files unchanged.")
           PY
 
       # ============================================================
@@ -735,15 +749,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Compiling PROD Bicep templates..."
-
-          az bicep build \
-            --file "$PROD_INFRA/main.bicep" \
-            --stdout > /dev/null
-
-          az bicep build-params \
-            --file "$PROD_PARAM_FILE" \
-            --stdout > /dev/null
+          az bicep build --file "$PROD_INFRA/main.bicep" --stdout > /dev/null
+          az bicep build-params --file "$PROD_PARAM_FILE" --stdout > /dev/null
 
           echo "SUCCESS: PROD Bicep compilation completed"
 
@@ -772,10 +779,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # ------------------------------------------------
-          # Check which allowed subnets are really empty.
-          # ------------------------------------------------
 
           SAFE_REMOVALS=""
 
@@ -807,10 +810,6 @@ jobs:
           done
 
           export SAFE_REMOVALS
-
-          # ------------------------------------------------
-          # What-if preview.
-          # ------------------------------------------------
 
           az deployment group what-if \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -868,6 +867,9 @@ jobs:
 
       # ============================================================
       # STEP 10: DEPLOY PROD INFRASTRUCTURE
+      #
+      # Starts the deployment with --no-wait and polls, so a short
+      # network blip on the runner cannot leave the job hanging.
       # ============================================================
 
       - name: Deploy PROD Infrastructure
@@ -879,36 +881,68 @@ jobs:
 
           echo "DEPLOYMENT_NAME=$DEPLOYMENT_NAME" >> "$GITHUB_ENV"
 
-          echo "Deploying TokenScope PROD infrastructure..."
+          echo "Deploying TokenScope PROD infrastructure: $DEPLOYMENT_NAME"
 
           az deployment group create \
             --name "$DEPLOYMENT_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --parameters "$PROD_PARAM_FILE" \
             --mode Incremental \
-            --only-show-errors \
-            --output none
+            --no-wait \
+            --only-show-errors
 
-          echo "SUCCESS: PROD infrastructure deployment completed"
+          for i in $(seq 1 180); do
+            STATE="$(az deployment group show \
+              -g "$AZURE_RESOURCE_GROUP" \
+              -n "$DEPLOYMENT_NAME" \
+              --query properties.provisioningState \
+              -o tsv 2>/dev/null || echo "Unknown")"
+
+            echo "[$i] Deployment state: $STATE"
+
+            case "$STATE" in
+              Succeeded)
+                echo "SUCCESS: PROD infrastructure deployment completed"
+                exit 0
+                ;;
+              Failed|Canceled)
+                az deployment operation group list \
+                  -g "$AZURE_RESOURCE_GROUP" \
+                  -n "$DEPLOYMENT_NAME" \
+                  --query "[?properties.provisioningState=='Failed'].{resource:properties.targetResource.resourceName, error:properties.statusMessage.error.message}" \
+                  -o table || true
+                echo "::error::Deployment $STATE"
+                exit 1
+                ;;
+            esac
+
+            sleep 20
+          done
+
+          echo "::error::Deployment did not finish within 60 minutes."
+          exit 1
 
       # ============================================================
-      # STEP 10B: VERIFY RUNNER SUBNET AND NSG AFTER DEPLOYMENT
+      # STEP 10B: VERIFY RUNNER SUBNET, NSG AND NAT AFTER DEPLOYMENT
       # ============================================================
 
-      - name: Verify Runner Subnet and NSG
+      - name: Verify Runner Subnet, NSG and NAT Gateway
+        if: always() && env.VNET_NAME != ''
         shell: bash
         run: |
           set -euo pipefail
 
-          ACTUAL_NSG="$(az network vnet subnet show \
+          SUBNET_JSON="$(az network vnet subnet show \
             -g "$AZURE_RESOURCE_GROUP" \
             --vnet-name "$VNET_NAME" \
             -n "$RUNNER_SUBNET_NAME" \
-            --query "networkSecurityGroup.id" \
-            -o tsv)"
+            -o json)"
+
+          ACTUAL_NSG="$(jq -r '.networkSecurityGroup.id // empty' <<< "$SUBNET_JSON")"
+          ACTUAL_NAT="$(jq -r '.natGateway.id // empty' <<< "$SUBNET_JSON")"
 
           if [ "${ACTUAL_NSG,,}" != "${RUNNER_NSG_ID,,}" ]; then
-            echo "::warning::Runner NSG was not attached after deployment. Re-attaching."
+            echo "::warning::Runner NSG missing after deployment. Re-attaching."
             az network vnet subnet update \
               -g "$AZURE_RESOURCE_GROUP" \
               --vnet-name "$VNET_NAME" \
@@ -917,7 +951,17 @@ jobs:
               --output none
           fi
 
-          echo "SUCCESS: $RUNNER_SUBNET_NAME exists with NSG ${RUNNER_NSG_ID##*/}"
+          if [ "${ACTUAL_NAT,,}" != "${RUNNER_NAT_ID,,}" ]; then
+            echo "::warning::NAT gateway missing after deployment. Re-attaching."
+            az network vnet subnet update \
+              -g "$AZURE_RESOURCE_GROUP" \
+              --vnet-name "$VNET_NAME" \
+              -n "$RUNNER_SUBNET_NAME" \
+              --nat-gateway "$RUNNER_NAT_ID" \
+              --output none
+          fi
+
+          echo "SUCCESS: $RUNNER_SUBNET_NAME has NSG ${RUNNER_NSG_ID##*/} and NAT ${RUNNER_NAT_ID##*/}"
 
       # ============================================================
       # STEP 11: SHOW DEPLOYMENT OUTPUTS
@@ -955,6 +999,12 @@ jobs:
                   print(f"{key}: {value}")
           PY
 
+          az containerapp show \
+            -g "$AZURE_RESOURCE_GROUP" \
+            -n ca-ts-prod-weu \
+            --query "{state:properties.provisioningState, revision:properties.latestReadyRevisionName}" \
+            -o table || true
+
       # ============================================================
       # STEP 12: SUMMARY
       # ============================================================
@@ -969,16 +1019,16 @@ jobs:
             echo "- Resource group: $AZURE_RESOURCE_GROUP"
             echo "- Subscription: $EXPECTED_SUBSCRIPTION"
             echo "- Region: $AZURE_LOCATION"
+            echo "- Deployment: ${DEPLOYMENT_NAME:-not started}"
             echo "- Front Door phase: $FRONT_DOOR_PHASE"
-            echo "- Runner subnet preserved: $RUNNER_SUBNET_NAME (NSG: $RUNNER_SUBNET_EXPECTED_NSG)"
+            echo "- Runner subnet: $RUNNER_SUBNET_NAME (NSG $RUNNER_SUBNET_EXPECTED_NSG, NAT kept)"
             echo ""
-            echo "- PostgreSQL geo backup override: $PROD_DISABLE_GEO_REDUNDANT_BACKUP"
+            echo "- PostgreSQL geo backup disabled: $PROD_DISABLE_GEO_REDUNDANT_BACKUP"
             echo "- PostgreSQL HA disabled (temporary exception): $PROD_DISABLE_POSTGRES_HA"
             echo "- Monitoring alerts enabled: $DEPLOY_MONITORING_ALERTS"
             echo "- Application alerts enabled: $DEPLOY_APP_ALERTS"
             echo ""
             echo "Shared repository Bicep files remain unchanged."
-            echo "Verify Container App health before image release."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ============================================================
